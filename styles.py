@@ -39,7 +39,11 @@ def inject_design_system() -> None:
     st.markdown(
         f"""
         <style>
-        :root {{
+            [data-testid="stSidebar"],
+            [data-testid="stSidebarCollapseButton"],
+            [data-testid="collapsedControl"] {{ display: none !important; }}
+
+            :root {{
           --sos-blue: {COLORS["trust_blue"]};
           --sos-navy: {COLORS["navy"]};
           --sos-orange: {COLORS["emergency_orange"]};

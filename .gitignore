@@ -1,0 +1,19 @@
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.streamlit/secrets.toml
+
+# Local editor and tool state
+.vscode/settings.json
+.claude/
+.gemini/
+
+# Local OS files
+.DS_Store
+Thumbs.db

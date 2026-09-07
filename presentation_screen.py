@@ -11,7 +11,6 @@ st.set_page_config(
     page_title="SOS Drive | Assistência quando importa",
     page_icon="🚘",
     layout="wide",
-    initial_sidebar_state="collapsed",
 )
 
 inject_design_system()
@@ -70,7 +69,7 @@ with st.container():
     with action:
         if st.button("Conhecer a SOS Drive", type="primary", icon=":material/arrow_forward:", width="stretch"):
             st.session_state["presentation_started"] = True
-            st.toast("Tudo certo. A Home Operacional está pronta para você.", icon=":material/check_circle:")
+            st.toast("Tudo certo. Você já conhece o caminho para pedir ajuda.", icon=":material/check_circle:")
     with secondary:
         st.button("Ver como funciona", icon=":material/play_circle:", width="stretch")
 
@@ -153,9 +152,9 @@ st.markdown(
 
 with st.container():
     st.markdown(
-        '<div class="sos-bottom-note"><strong>Uma porta de entrada, não um labirinto.</strong><br><span>Quando quiser testar o fluxo, abra a Home Operacional no menu lateral.</span></div>',
+        '<div class="sos-bottom-note"><strong>Uma porta de entrada, não um labirinto.</strong><br><span>Quando precisar, a SOS Drive ajuda você a encontrar o próximo passo.</span></div>',
         unsafe_allow_html=True,
     )
 
 if st.session_state.get("presentation_started"):
-    st.success("Apresentação concluída. Abra a Home Operacional para iniciar uma solicitação.", icon=":material/check_circle:")
+    st.success("Apresentação concluída. A SOS Drive está pronta para ajudar.", icon=":material/check_circle:")
