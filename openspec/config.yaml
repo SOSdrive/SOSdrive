@@ -1,0 +1,97 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  ## Projeto
+
+  SOS Drive — plataforma que conecta motoristas a prestadores de serviço de
+  socorro veicular, permitindo localizar ajuda próxima, solicitar
+  atendimento e acompanhar o chamado.
+
+  ## Problema
+
+  Motoristas com pane mecânica, pneu furado, bateria descarregada ou falta
+  de combustível têm dificuldade em encontrar rapidamente um serviço de
+  socorro confiável e próximo, sem saber disponibilidade, tempo de chegada
+  ou custo aproximado.
+
+  ## MVP (escopo atual)
+
+  - Cadastro de usuários e prestadores.
+  - Cadastro dos tipos de socorro (pane mecânica, pneu furado, bateria
+    descarregada, falta de combustível).
+  - Solicitação de atendimento.
+  - Localização.
+  - Acompanhamento do chamado.
+  - Avaliação.
+
+  Fora do MVP (não implementar sem discussão prévia): pagamentos, histórico
+  avançado, integrações externas.
+
+  ## Tech stack
+
+  - Backend/lógica: Python.
+  - Frontend: Streamlit.
+  - Fluxo de desenvolvimento: OpenSpec (proposta de spec antes da
+    implementação).
+
+  ## Domínio (ver docs/domain-model.md para detalhes completos)
+
+  - Motorista: solicita chamados, acompanha e avalia.
+  - Prestador: recebe, aceita e atende chamados.
+  - Tipo de Socorro: classifica o chamado.
+  - Chamado: entidade central; possui status (solicitado, a caminho, em
+    atendimento, concluído, cancelado); pertence a um motorista; pode ser
+    atendido por, no máximo, um prestador por vez.
+  - Avaliação: pertence a um único chamado, só pode existir após conclusão.
+  - Localização: usada para aproximar motorista e prestador.
+
+  ## Documentos de referência
+
+  - docs/project-overview.md — visão geral, objetivos, escopo, requisitos.
+  - docs/domain-model.md — entidades, atributos, relacionamentos, regras
+    estruturais.
+  - AGENTS.md — regras operacionais para qualquer agente que altere o
+    projeto.
+
+  ## Princípios do projeto
+
+  - Consultar os documentos de contexto antes de mudanças significativas.
+  - Não introduzir tecnologias alternativas a Python/Streamlit sem
+    justificativa explícita e registrada.
+  - Reutilizar código existente; evitar duplicação.
+  - Não alterar funcionalidades não relacionadas à mudança atual sem
+    justificativa.
+  - Regras de autorização sempre aplicadas no backend, nunca só no
+    frontend/Streamlit.
+  - Toda mudança funcional passa pelo fluxo do OpenSpec.
+  - Toda mudança funcional deve ter estratégia de verificação (manual ou
+    automatizada) antes de ser considerada concluída.
+
+rules:
+  proposal:
+    - Consultar docs/project-overview.md e docs/domain-model.md antes de propor a mudança
+    - Indicar se a mudança está dentro do escopo do MVP; se não estiver, justificar explicitamente
+    - Justificar qualquer tecnologia fora de Python/Streamlit
+    - Indicar impacto em entidades do domain-model.md (Motorista, Prestador, Tipo de Socorro, Chamado, Avaliação, Localização)
+    - Indicar se a proposta reutiliza fluxo/código existente ou introduz algo novo
+    - Não propor alteração em funcionalidade não relacionada sem justificativa
+    - Incluir plano de rollback quando a mudança afetar dados de Chamado ou Avaliação
+
+  specs:
+    - Usar terminologia consistente com docs/domain-model.md (não renomear entidades livremente)
+    - Descrever regras estruturais importantes (ex.: status do Chamado, unicidade da Avaliação por Chamado, um prestador por Chamado por vez)
+    - Usar formato Given/When/Then para cenários funcionais, quando aplicável
+    - Especificar regras de autorização envolvidas (quem pode ver/alterar o quê)
+
+  design:
+    - Respeitar a arquitetura definida (Python no backend/lógica, Streamlit no frontend)
+    - Explicitar onde a autorização/validação será aplicada (sempre no backend)
+    - Indicar quais entidades do domain-model.md são criadas, lidas, atualizadas ou removidas
+    - Apontar reuso de componentes/telas existentes antes de propor novos
+
+  tasks:
+    - Incluir tarefa de verificação/teste para toda mudança funcional
+    - Sinalizar se a tarefa reutiliza código existente ou cria algo novo
+    - Sinalizar tarefas que tocam regras de autorização, marcando-as como backend
+    - Não incluir tarefas fora do escopo do MVP sem referência à justificativa da proposta
