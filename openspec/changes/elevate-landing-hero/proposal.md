@@ -1,6 +1,6 @@
 ## Why
 
-A landing page already exists in Python/Streamlit, but its hero is visually flat: content is stacked without layered depth, a strong typographic scale, or the calm visual richness expected from a modern emergency-assistance product. The page needs a reusable visual foundation before the operational Home and future screens are built on top of it.
+A landing page already exists in Python/Reflex, but its hero is visually flat: content is stacked without layered depth, a strong typographic scale, or the calm visual richness expected from a modern emergency-assistance product. The page needs a reusable visual foundation before the operational Home and future screens are built on top of it.
 
 ## What Changes
 
@@ -13,7 +13,7 @@ A landing page already exists in Python/Streamlit, but its hero is visually flat
 - Style the primary CTA with an emergency-orange gradient, colored shadow, and restrained hover elevation.
 - Extract shared visual tokens and CSS injection helpers into a reusable Python style module for future screens.
 - Add `prefers-reduced-motion` rules that disable all glow and illustration animation.
-- Keep the implementation entirely in Python + Streamlit, with no new package dependency, Node service, React/Vue app, 3D engine, or external renderer.
+- Keep the implementation entirely in Python + Reflex, with no Node service, React/Vue app, 3D engine, or external renderer.
 
 ## Capabilities
 
@@ -29,6 +29,6 @@ A landing page already exists in Python/Streamlit, but its hero is visually flat
 
 - **Frontend**: `presentation_screen.py` and a shared Python style module such as `styles.py`.
 - **Assets**: optional transparent PNG/WebP illustrations under `assets/`; missing assets must not break rendering.
-- **Runtime**: CSS is injected with Streamlit-safe HTML/CSS from Python. No frontend stack change.
+- **Runtime**: CSS is defined through Reflex global styles from Python. No backend stack change.
 - **Dependencies**: no new Python package is required.
 - **Future reuse**: the shared tokens and classes remain available to future screens without coupling them to the landing.

@@ -1,8 +1,8 @@
 ## 1. Shared visual foundation
 
-- [x] 1.1 Create `styles.py` with SOS Drive color/type/spacing tokens and verify it imports without requiring Streamlit app execution
+- [x] 1.1 Create `styles.py` with SOS Drive color/type/spacing tokens and verify it imports without requiring app execution
 - [x] 1.2 Add `load_local_asset_data_uri` for PNG/WebP assets with silent missing-file fallback and verify absent assets produce no exception or broken markup
-- [x] 1.3 Add scoped CSS injection for glow, glass, chips, CTA, focus, responsive behavior, and `prefers-reduced-motion`; verify selectors do not alter unrelated Streamlit pages
+- [x] 1.3 Add global Reflex styles for glow, glass, chips, CTA, focus, responsive behavior, and `prefers-reduced-motion`
 
 ## 2. Landing hero refactor
 
@@ -14,7 +14,7 @@
 
 ## 3. Responsive and accessibility validation
 
-- [x] 3.1 Validate desktop layout in the running Streamlit app and verify no horizontal overflow
+- [x] 3.1 Validate desktop layout in the running Reflex app and verify no horizontal overflow
 - [x] 3.2 Validate mobile viewport layout and verify CTA, chips, and assistance panel remain readable and reachable
 - [x] 3.3 Validate keyboard focus order and effective text contrast; verify normal text reaches at least 4.5:1
 - [x] 3.4 Validate `prefers-reduced-motion` and verify glow/illustration animations are disabled

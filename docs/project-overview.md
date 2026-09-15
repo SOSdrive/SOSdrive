@@ -47,7 +47,7 @@ MVP:
 ## 8. Arquitetura tecnológica
 
 - Backend/lógica em **Python**.
-- Frontend em **Streamlit**.
+- Frontend em **Reflex**.
 - Desenvolvimento conduzido com **OpenSpec** (proposta de spec antes da implementação).
 
 ## 9. Princípios de desenvolvimento

@@ -1,6 +1,6 @@
 ## Purpose
 
-Provides a layered, accessible visual system for the SOS Drive landing hero while preserving the existing content and keeping all frontend behavior in Python and Streamlit.
+Provides a layered, accessible visual system for the SOS Drive landing hero while preserving the existing content and keeping all frontend behavior in Python and Reflex.
 
 ## ADDED Requirements
 

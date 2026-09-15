@@ -14,7 +14,7 @@ consultar os documentos de contexto do projeto
 
 ```text
 Respeitar as tecnologias definidas no projeto:
-Python no backend/lógica e Streamlit no frontend.
+Python no backend/lógica e Reflex no frontend.
 Não introduzir tecnologias alternativas
 (outro framework de frontend, outra linguagem, etc.)
 sem justificativa explícita e registrada.
@@ -33,7 +33,7 @@ Não modificar funcionalidades não relacionadas
 
 ```text
 Regras de autorização devem ser aplicadas no backend,
-nunca apenas no frontend/Streamlit.
+nunca apenas no frontend/Reflex.
 ```
 
 ## Desenvolvimento

@@ -31,7 +31,7 @@ context: |
   ## Tech stack
 
   - Backend/lógica: Python.
-  - Frontend: Streamlit.
+  - Frontend: Reflex.
   - Fluxo de desenvolvimento: OpenSpec (proposta de spec antes da
     implementação).
 
@@ -57,13 +57,13 @@ context: |
   ## Princípios do projeto
 
   - Consultar os documentos de contexto antes de mudanças significativas.
-  - Não introduzir tecnologias alternativas a Python/Streamlit sem
+  - Não introduzir tecnologias alternativas a Python/Reflex sem
     justificativa explícita e registrada.
   - Reutilizar código existente; evitar duplicação.
   - Não alterar funcionalidades não relacionadas à mudança atual sem
     justificativa.
   - Regras de autorização sempre aplicadas no backend, nunca só no
-    frontend/Streamlit.
+    frontend/Reflex.
   - Toda mudança funcional passa pelo fluxo do OpenSpec.
   - Toda mudança funcional deve ter estratégia de verificação (manual ou
     automatizada) antes de ser considerada concluída.
@@ -72,7 +72,7 @@ rules:
   proposal:
     - Consultar docs/project-overview.md e docs/domain-model.md antes de propor a mudança
     - Indicar se a mudança está dentro do escopo do MVP; se não estiver, justificar explicitamente
-    - Justificar qualquer tecnologia fora de Python/Streamlit
+    - Justificar qualquer tecnologia fora de Python/Reflex
     - Indicar impacto em entidades do domain-model.md (Motorista, Prestador, Tipo de Socorro, Chamado, Avaliação, Localização)
     - Indicar se a proposta reutiliza fluxo/código existente ou introduz algo novo
     - Não propor alteração em funcionalidade não relacionada sem justificativa
@@ -85,7 +85,7 @@ rules:
     - Especificar regras de autorização envolvidas (quem pode ver/alterar o quê)
 
   design:
-    - Respeitar a arquitetura definida (Python no backend/lógica, Streamlit no frontend)
+    - Respeitar a arquitetura definida (Python no backend/lógica, Reflex no frontend)
     - Explicitar onde a autorização/validação será aplicada (sempre no backend)
     - Indicar quais entidades do domain-model.md são criadas, lidas, atualizadas ou removidas
     - Apontar reuso de componentes/telas existentes antes de propor novos

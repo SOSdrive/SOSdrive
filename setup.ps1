@@ -29,10 +29,10 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "✅ Dependências instaladas com sucesso!" -ForegroundColor Green
     Write-Host ""
     Write-Host "🚀 Para iniciar a aplicação, execute:" -ForegroundColor Cyan
-    Write-Host "   .venv\Scripts\streamlit.exe run presentation_screen.py" -ForegroundColor White
+    Write-Host "   .venv\Scripts\reflex.exe run" -ForegroundColor White
     Write-Host ""
     Write-Host "📱 Acessar em:" -ForegroundColor Cyan
-    Write-Host "   http://localhost:8501" -ForegroundColor White
+    Write-Host "   http://localhost:3000" -ForegroundColor White
 } else {
     Write-Host "❌ Erro ao instalar dependências" -ForegroundColor Red
     exit 1

@@ -1,6 +1,6 @@
 ## Context
 
-See proposal.md for the motivation. The landing page runs as a Python/Streamlit app and has the required hero content, assistance panel, trust chips, CTA, and “Como funciona” section. The implementation must preserve those texts without introducing a separate operational flow.
+See proposal.md for the motivation. The landing page runs as a Python/Reflex app and has the required hero content, assistance panel, trust chips, CTA, and “Como funciona” section. The implementation must preserve those texts without introducing a separate operational flow.
 
 ## Goals / Non-Goals
 
@@ -38,7 +38,7 @@ See proposal.md for the motivation. The landing page runs as a Python/Streamlit 
 
 **Decision:** Read optional PNG/WebP files from `assets/`, convert bytes to base64 data URIs in Python, and render only assets that exist. Each illustration receives its own scoped class, drop shadow, duration, rotation, and delay. Missing files return no markup and never raise an exception.
 
-**Rationale:** Streamlit does not serve arbitrary static files directly inside injected HTML reliably across deployments. Data URIs keep the implementation local and portable.
+**Rationale:** Reflex static assets should remain local and portable across deployments. Missing files must continue to be silent.
 
 ### 4. Glassmorphism treatment
 
@@ -67,7 +67,7 @@ See proposal.md for the motivation. The landing page runs as a Python/Streamlit 
 - **Backdrop blur support varies** → use a translucent solid fallback background behind the glass panel.
 - **Large embedded images increase HTML size** → restrict to small local PNG/WebP assets and skip oversized files.
 - **Glow may reduce contrast in an unusual theme** → keep opacity low, validate text contrast on the rendered surface, and retain opaque text colors.
-- **CSS selectors can conflict with Streamlit theme classes** → scope all custom classes beneath the hero wrapper and avoid broad global selectors.
+- **CSS selectors can conflict with framework defaults** → scope custom classes and avoid broad global selectors.
 - **Absent assets can reduce visual richness** → the base hero remains complete without illustrations, with no error state or broken-image icon.
 
 ## Migration Plan
@@ -76,7 +76,7 @@ See proposal.md for the motivation. The landing page runs as a Python/Streamlit 
 2. Move the landing hero CSS into the module and wrap the existing hero content with the scoped layered container.
 3. Render available local illustrations and verify the silent fallback with an empty assets folder.
 4. Validate desktop/mobile screenshots, keyboard focus, contrast, and reduced-motion mode.
-5. Reuse the module from future Streamlit screens when they are added.
+5. Reuse the module from future Reflex screens when they are added.
 
 ## Open Questions
 
