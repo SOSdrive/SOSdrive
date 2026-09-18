@@ -58,6 +58,8 @@ class AppState(rx.State):
     error_message: str = ""
     signup_message: str = ""
     is_loading: bool = False
+    active_call_status: str | None = None
+    active_call_eta: str = "15 min"
 
     # Profile Fields (Mock)
     user_profile_photo: str = ""
@@ -204,6 +206,32 @@ class OperationalState(rx.State):
         {"id": 101, "service_type": "Pneu Furado", "coords": [-23.5520, -46.6340], "status": "pending"},
         {"id": 102, "service_type": "Bateria", "coords": [-23.5580, -46.6310], "status": "pending"},
     ]
+    is_available: bool = True
+    available_requests: list[dict] = [
+        {
+            "id": 201,
+            "type": "Combustível",
+            "service_icon": "⛽",
+            "user": "Pedro Lima",
+            "phone": "(11) 98888-1111",
+            "distance": "4.1 km",
+            "address": "Av. Paulista, 1578 - Bela Vista, São Paulo",
+            "coords": [-23.5614, -46.6559],
+            "maps_url": "https://www.google.com/maps/dir/?api=1&destination=-23.5614,-46.6559",
+        },
+        {
+            "id": 202,
+            "type": "Troca de Pneu",
+            "service_icon": "🛞",
+            "user": "Ana Souza",
+            "phone": "(11) 97777-2222",
+            "distance": "2.8 km",
+            "address": "Rua Haddock Lobo, 400 - Cerqueira César, São Paulo",
+            "coords": [-23.5588, -46.6621],
+            "maps_url": "https://www.google.com/maps/dir/?api=1&destination=-23.5588,-46.6621",
+        },
+    ]
+    selected_request: dict = {}
 
 
     # Customer Request state
@@ -305,10 +333,30 @@ class OperationalState(rx.State):
 
     def toggle_provider_status(self):
         """Toggle status of the current simulated provider."""
+        self.is_available = not self.is_available
         for p in self.providers:
             if p["id"] == self.current_provider_id:
                 p["status"] = "offline" if p["status"] == "online" else "online"
         self.providers = self.providers # Trigger state update
+
+    def accept_request(self, request_id: int):
+        """Select a request and open its service details."""
+        request = next((item for item in self.available_requests if item["id"] == request_id), None)
+        if request is None:
+            return rx.toast("Solicitação não encontrada.")
+        self.selected_request = request
+        self.available_requests = [item for item in self.available_requests if item["id"] != request_id]
+        return rx.redirect("/service-details")
+
+    def refuse_request(self, request_id: int):
+        """Remove a request from the provider's local queue."""
+        self.available_requests = [item for item in self.available_requests if item["id"] != request_id]
+        return rx.toast("Solicitação recusada.")
+
+    def reset_provider_home(self):
+        """Restore the provider home presentation after returning from details."""
+        self.is_available = True
+        self.selected_request = {}
 
     def update_provider_location(self, provider_id: int, lat: float, lng: float):
         """Update a provider's real-time location."""
@@ -522,7 +570,7 @@ def profile_avatar() -> rx.Component:
 
 def vehicle_card(v: dict) -> rx.Component:
     """Card for displaying a single vehicle."""
-    return rx.box(
+    return rx.hstack(
         rx.hstack(
             rx.vstack(
                 rx.text(f"{v['brand']} {v['model']}", weight="bold", size="3"),
@@ -660,7 +708,7 @@ def vehicle_modal() -> rx.Component:
 
 
 def brand_header() -> rx.Component:
-    return rx.hstack(
+    return rx.box(
         rx.hstack(
             rx.box("✦", class_name="brand-mark"),
             rx.text("SOS drive", class_name="brand-name"),
@@ -1583,13 +1631,452 @@ def home_screen() -> rx.Component:
         ),
         on_mount=rx.cond(
             AppState.user_role == "provider",
-            rx.redirect("/provider"),
-            rx.redirect("/customer"),
+            rx.redirect("/home_provider"),
+            rx.redirect("/home_client"),
         ),
     )
 
 def index() -> rx.Component:
     return rx.box(landing_page(), class_name="app-shell")
+
+
+def shortcut_card(icon: str, label: str, action) -> rx.Component:
+    """Render one quick-access card for the client home."""
+    return rx.box(
+        rx.vstack(
+            rx.text(icon, font_size="1.8rem"),
+            rx.text(label, weight="bold", color=COLORS["navy"], text_align="center"),
+            align="center",
+            spacing="2",
+        ),
+        class_name="op-card",
+        width="100%",
+        aspect_ratio="1",
+        cursor="pointer",
+        on_click=action,
+    )
+
+
+def user_home_screen() -> rx.Component:
+    """Repaginated home screen for the client focusing on hierarchy and contrast."""
+    return rx.hstack(
+        # LEFT SIDE: CONTROL PANEL
+        rx.vstack(
+            # 1. Header Section
+            rx.hstack(
+                rx.vstack(
+                    rx.text("Olá,", font_size="1rem", color=COLORS["muted"]),
+                    rx.text(AppState.user_full_name, weight="bold", font_size="1.4rem", color=COLORS["navy"]),
+                    align="start",
+                    spacing="0",
+                ),
+                rx.spacer(),
+                rx.box(
+                    profile_avatar(),
+                    border=f"2px solid {COLORS['line']}",
+                    border_radius="50%",
+                    padding="2px",
+                    box_shadow="0 2px 8px rgba(0,0,0,0.1)",
+                    cursor="pointer",
+                    on_click=rx.redirect("/profile"),
+                ),
+                width="100%",
+                justify="between",
+                align="center",
+                margin_bottom="2rem",
+            ),
+            # 2. Hero Section (Request Help)
+            rx.cond(
+                AppState.active_call_status == None,
+                # State A: No active call
+                rx.button(
+                    rx.vstack(
+                        rx.text("🚨", font_size="3.5rem"),
+                        rx.text("Solicitar Socorro", color="white", weight="bold", font_weight="bold", font_size="1.6rem"),
+                        align="center",
+                        spacing="2",
+                    ),
+                    on_click=rx.redirect("/customer"),
+                    class_name="primary-button sos-request-button",
+                    width="100%",
+                    height="14rem",
+                    border_radius="32px",
+                    color="white",
+                    cursor="pointer",
+                ),
+                # State B: Active call
+                rx.box(
+                    rx.vstack(
+                        rx.hstack(
+                            rx.text("🕒", font_size="1.5rem"),
+                            rx.text("Chamado em andamento", weight="bold", size="5", color=COLORS["navy"]),
+                            spacing="2",
+                            align="center",
+                        ),
+                        rx.text(f"Chegada estimada: {AppState.active_call_eta}", color=COLORS["muted"], font_size="1rem"),
+                        rx.button(
+                            "Acompanhar Agora",
+                            on_click=rx.redirect("/customer"),
+                            class_name="primary-button",
+                            width="100%",
+                            margin_top="1rem",
+                        ),
+                        align="start",
+                        spacing="3",
+                    ),
+                    padding="1.5rem",
+                    background="white",
+                    border=f"2px solid {COLORS['emergency_orange']}",
+                    border_radius="24px",
+                    width="100%",
+                    box_shadow="0 4px 12px rgba(249,115,22,0.15)",
+                ),
+            ),
+            # 3. Shortcuts Grid
+            rx.grid(
+                shortcut_card("🚗", "Meus Veículos", rx.redirect("/profile")),
+                shortcut_card("📜", "Histórico", rx.redirect("/profile")),
+                shortcut_card("⚙️", "Perfil", rx.redirect("/profile")),
+                columns="3",
+                spacing="4",
+                width="100%",
+                margin_top="2rem",
+            ),
+            # 4. Bottom Section (Location Context - status text only)
+            rx.vstack(
+                rx.hstack(
+                    rx.text("📍 Localização Atual", weight="bold", font_size="0.9rem", color=COLORS["navy"]),
+                    rx.spacer(),
+                    rx.text("✅ Nenhum chamado ativo", font_size="0.75rem", color="#22C55E", weight="bold"),
+                    width="100%",
+                    margin_bottom="1rem",
+                    align="center",
+                ),
+                align="start",
+                width="100%",
+                margin_top="3rem",
+            ),
+            align="start",
+            spacing="6",
+            width=["100%", "100%", "100%", "420px"],
+            flex=["none", "none", "none", "0 0 420px"],
+            height=["auto", "auto", "auto", "100%"],
+            padding="2rem",
+            background="white",
+            border_radius=["24px 24px 0 0", "24px 24px 0 0", "24px 24px 0 0", "24px"],
+        ),
+        # RIGHT SIDE: MAP AREA
+        rx.box(
+            rx.box(
+                id="user-home-map-fixed",
+                width="100%",
+                height="100%",
+                on_mount=rx.call_script(
+                    "window.initSOSMap('user-home-map-fixed', [-23.5505, -46.6333], 13);"
+                ),
+            ),
+            width=["100%", "100%", "100%", "auto"],
+            height=["60vh", "60vh", "60vh", "100%"],
+            flex=["none", "none", "none", "1"],
+            border_radius=["24px", "24px", "24px", "24px"],
+            overflow="hidden",
+        ),
+        width="100vw",
+        height="100vh",
+        display="flex",
+        flex_direction=["column", "column", "column", "row"],
+        align="stretch",
+        spacing="0",
+        padding="0",
+        overflow_y=["auto", "auto", "auto", "hidden"],
+        class_name="user-home-root",
+    )
+
+def provider_home_screen() -> rx.Component:
+    """Central hub for the provider."""
+    return rx.box(
+        # Header
+        rx.hstack(
+            rx.hstack(
+                rx.text("Status:", weight="bold"),
+                rx.checkbox(
+                    checked=OperationalState.is_available,
+                    on_change=OperationalState.toggle_provider_status,
+                ),
+                rx.text(
+                    rx.cond(OperationalState.is_available, "Disponível", "Indisponível"),
+                    weight="bold",
+                    color=rx.cond(OperationalState.is_available, "#22C55E", "#EF4444"),
+                ),
+                spacing="2",
+                align="center",
+            ),
+            rx.spacer(),
+            profile_avatar(),
+            position="absolute",
+            top="2rem",
+            left="2rem",
+            right="2rem",
+            z_index="100",
+            align="center",
+        ),
+        # Main Body (50/50 Split)
+        rx.vstack(
+            # Upper Half: Map
+            rx.box(
+                id="provider-home-map",
+                width="100%",
+                height="50vh",
+                position="relative",
+                on_mount=rx.call_script(
+                    "window.initSOSMap('provider-home-map', [-23.5505, -46.6333], 13);"
+                ),
+            ),
+            # Lower Half: Requests List
+            rx.box(
+                rx.cond(
+                    OperationalState.is_available,
+                    rx.vstack(
+                        rx.text(
+                            "Solicitações Próximas",
+                            weight="bold",
+                            size="5",
+                            color=COLORS["navy"],
+                            margin_bottom="1rem",
+                        ),
+                        rx.vstack(
+                            rx.foreach(
+                                OperationalState.available_requests,
+                                lambda r: rx.hstack(
+                                    rx.box(
+                                        rx.text(r["service_icon"], font_size="1.8rem"),
+                                        width="3rem",
+                                        height="3rem",
+                                        display="flex",
+                                        align_items="center",
+                                        justify_content="center",
+                                        background="#FFF7ED",
+                                        border_radius="12px",
+                                        flex_shrink="0",
+                                    ),
+                                    rx.vstack(
+                                        rx.text(r["type"], weight="bold", color=COLORS["navy"]),
+                                        rx.text(f"👤 {r['user']} • 📍 {r['distance']}", font_size="0.8rem", color=COLORS["text"]),
+                                        align="start",
+                                        spacing="1",
+                                    ),
+                                    rx.spacer(),
+                                    rx.hstack(
+                                        rx.button("Aceitar", on_click=lambda: OperationalState.accept_request(r["id"]), class_name="primary-button", size="1"),
+                                        rx.button("Recusar", on_click=lambda: OperationalState.refuse_request(r["id"]), class_name="secondary-button", size="1"),
+                                        spacing="2",
+                                    ),
+                                    width="100%",
+                                    padding="1rem",
+                                    background="white",
+                                    border=f"1px solid {COLORS['line']}",
+                                    border_radius="12px",
+                                    box_shadow="0 4px 12px rgba(15,23,42,0.08)",
+                                    spacing="3",
+                                ),
+                            ),
+                            spacing="4",
+                            width="100%",
+                        ),
+                    ),
+                    rx.center(
+                        rx.text("Você está indisponível para novos chamados", weight="bold", color=COLORS["muted"]),
+                        width="100%",
+                        height="100%",
+                    ),
+                ),
+                width="100%",
+                height="50vh",
+                overflow_y="auto",
+                padding="1rem",
+                background="white",
+            ),
+            width="100%",
+            height="100vh",
+            spacing="0",
+        ),
+        on_mount=OperationalState.reset_provider_home,
+        background="white",
+        width="100%",
+        min_height="100vh",
+    )
+
+
+def service_details_screen() -> rx.Component:
+    """Show the selected request details and route preview for a provider."""
+    return rx.box(
+        rx.vstack(
+            rx.hstack(
+                rx.button(
+                    "← Voltar",
+                    on_click=rx.redirect("/home_provider"),
+                    class_name="secondary-button",
+                    size="1",
+                ),
+                rx.heading("Detalhes do Atendimento", size="6", color=COLORS["navy"]),
+                align="center",
+                spacing="4",
+                width="100%",
+            ),
+            rx.grid(
+                rx.vstack(
+                    rx.hstack(
+                        rx.box(
+                            rx.text(
+                                OperationalState.selected_request["service_icon"],
+                                font_size="2rem",
+                                color=COLORS["emergency_orange"],
+                            ),
+                            width="4rem",
+                            height="4rem",
+                            display="flex",
+                            align_items="center",
+                            justify_content="center",
+                            background="#FFF7ED",
+                            border_radius="16px",
+                        ),
+                        rx.vstack(
+                            rx.text(OperationalState.selected_request["type"], weight="bold", size="5", color=COLORS["navy"]),
+                            rx.text("Solicitação de atendimento", color=COLORS["muted"]),
+                            align="start",
+                            spacing="1",
+                        ),
+                        align="center",
+                        spacing="4",
+                    ),
+                    rx.vstack(
+                        rx.text("Cliente", class_name="field-label"),
+                        rx.text(OperationalState.selected_request["user"], size="5", weight="bold", color=COLORS["navy"]),
+                        rx.text(OperationalState.selected_request["address"], color=COLORS["text"]),
+                        rx.text(f"Distância: {OperationalState.selected_request['distance']}", color=COLORS["muted"]),
+                        align="start",
+                        spacing="2",
+                    ),
+                    rx.hstack(
+                        rx.link(
+                        rx.hstack(
+                            rx.text("☎"),
+                            rx.text("Ligar"),
+                            width="100%",
+                            justify="center",
+                            align="center",
+                            spacing="2",
+                        ),
+                        href=rx.cond(
+                            OperationalState.selected_request["phone"] != "",
+                            f"tel:{OperationalState.selected_request['phone']}",
+                            "#",
+                        ),
+                        class_name="primary-button action-button",
+                        width="auto",
+                        padding_x="1.25rem",
+                    ),
+                    rx.button(
+                        rx.hstack(
+                            rx.text("💬"),
+                            rx.text("Mensagem"),
+                            width="100%",
+                            justify="center",
+                            align="center",
+                            spacing="2",
+                        ),
+                        class_name="secondary-button action-button",
+                        width="auto",
+                        padding_x="1.25rem",
+                    ),
+                    spacing="3",
+                    width="100%",
+                    ),
+                    rx.vstack(
+                        rx.text("Status do atendimento", class_name="field-label"),
+                        rx.text("A caminho", color=COLORS["emergency_orange"], weight="bold"),
+                        rx.hstack(
+                            rx.button(
+                                rx.hstack(rx.text("📍"), rx.text("Cheguei"), width="100%", justify="center", spacing="2"),
+                                class_name="secondary-button action-button",
+                                size="1",
+                                width="auto",
+                                padding_x="1rem",
+                            ),
+                            rx.button(
+                                rx.hstack(rx.text("✓"), rx.text("Concluído"), width="100%", justify="center", spacing="2"),
+                                class_name="secondary-button action-button",
+                                size="1",
+                                width="auto",
+                                padding_x="1rem",
+                            ),
+                            spacing="3",
+                        ),
+                        align="start",
+                        spacing="2",
+                    ),
+                    rx.link(
+                        rx.hstack(
+                            rx.text("➤"),
+                            rx.text("Como Chegar"),
+                            width="100%",
+                            justify="center",
+                            align="center",
+                            spacing="2",
+                        ),
+                        href=OperationalState.selected_request["maps_url"],
+                        is_external=True,
+                        class_name="primary-button action-button",
+                        width="auto",
+                        padding_x="1.5rem",
+                    ),
+                    rx.button(
+                        rx.hstack(
+                            rx.text("←"),
+                            rx.text("Cancelar / Voltar"),
+                            width="100%",
+                            justify="center",
+                            align="center",
+                            spacing="2",
+                        ),
+                        on_click=rx.redirect("/home_provider"),
+                        class_name="secondary-button action-button",
+                        width="auto",
+                        padding_x="1.5rem",
+                    ),
+                    class_name="op-card",
+                    align="start",
+                    spacing="5",
+                    width="100%",
+                ),
+                rx.box(
+                    rx.box(
+                        id="service-details-map",
+                        width="100%",
+                        height="100%",
+                        on_mount=rx.call_script(
+                            "window.initSOSMap('service-details-map', [-23.5614, -46.6559], 14);"
+                        ),
+                    ),
+                    width="100%",
+                    height=["50vh", "50vh", "70vh"],
+                    border_radius="20px",
+                    overflow="hidden",
+                ),
+                columns="1",
+                class_name="service-details-grid",
+                spacing="6",
+                width="100%",
+            ),
+            width="100%",
+            max_width="1200px",
+            padding=["1rem", "2rem", "3rem"],
+            spacing="6",
+        ),
+        width="100%",
+        min_height="100vh",
+        background=COLORS["background"],
+    )
 
 
 app = rx.App(
@@ -1685,9 +2172,12 @@ app = rx.App(
 )
 app.add_page(index, route="/", title="SOS Drive | Assistência quando importa")
 app.add_page(home_screen, route="/home", title="Home | SOS Drive")
+app.add_page(user_home_screen, route="/home_client", title="Home Cliente | SOS Drive")
 app.add_page(signup_screen, route="/signup", title="Cadastro | SOS Drive")
 app.add_page(login_screen, route="/login", title="Login | SOS Drive")
 app.add_page(customer_dashboard, route="/customer", title="Dashboard Cliente | SOS Drive")
 app.add_page(provider_dashboard, route="/provider", title="Dashboard Prestador | SOS Drive")
+app.add_page(provider_home_screen, route="/home_provider", title="Solicitações Próximas | SOS Drive")
+app.add_page(service_details_screen, route="/service-details", title="Detalhes do Atendimento | SOS Drive")
 app.add_page(profile_screen, route="/profile", title="Meu Perfil | SOS Drive")
 app.add_page(map_test_screen, route="/test-map", title="Teste de Mapa | SOS Drive")
