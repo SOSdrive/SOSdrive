@@ -42,6 +42,25 @@ def login_with_xano(email: str, password: str, api_url: str) -> tuple[str, int]:
     return auth_token, user_id
 
 
+def build_atendimento_mock(request: dict, provider_coords: list[float]) -> dict:
+    """Build a local/mock attendance payload from one accepted request."""
+    return {
+        "id": request.get("id", 0),
+        "nome": request.get("user", "Usuário"),
+        "tipo_problema": request.get("type", "Solicitação"),
+        "veiculo": request.get("vehicle", "Veículo não informado"),
+        "endereco": request.get("address", "Endereço não informado"),
+        "observacao": request.get("note", "Sem observações."),
+        "phone": request.get("phone", ""),
+        "distance": request.get("distance", "0.0 km"),
+        "eta": request.get("eta", "15 min"),
+        "maps_url": request.get("maps_url", "#"),
+        "user_coords": request.get("coords", [-23.5505, -46.6333]),
+        "provider_coords": provider_coords,
+        "service_icon": request.get("service_icon", "🛠️"),
+    }
+
+
 class AppState(rx.State):
     """Application state for navigation and driver authentication."""
 
@@ -214,7 +233,10 @@ class OperationalState(rx.State):
             "service_icon": "⛽",
             "user": "Pedro Lima",
             "phone": "(11) 98888-1111",
+            "vehicle": "Toyota Corolla - ABC-1234",
+            "note": "Estou no acostamento, sem risco imediato.",
             "distance": "4.1 km",
+            "eta": "9 min",
             "address": "Av. Paulista, 1578 - Bela Vista, São Paulo",
             "coords": [-23.5614, -46.6559],
             "maps_url": "https://www.google.com/maps/dir/?api=1&destination=-23.5614,-46.6559",
@@ -225,13 +247,19 @@ class OperationalState(rx.State):
             "service_icon": "🛞",
             "user": "Ana Souza",
             "phone": "(11) 97777-2222",
+            "vehicle": "Fiat Mobi - QWE-9087",
+            "note": "Pneu dianteiro esquerdo furou ao sair do estacionamento.",
             "distance": "2.8 km",
+            "eta": "6 min",
             "address": "Rua Haddock Lobo, 400 - Cerqueira César, São Paulo",
             "coords": [-23.5588, -46.6621],
             "maps_url": "https://www.google.com/maps/dir/?api=1&destination=-23.5588,-46.6621",
         },
     ]
     selected_request: dict = {}
+    atendimento_mock: dict = {}
+    atendimento_phase: str = ""
+    show_cancel_confirm: bool = False
 
 
     # Customer Request state
@@ -340,13 +368,18 @@ class OperationalState(rx.State):
         self.providers = self.providers # Trigger state update
 
     def accept_request(self, request_id: int):
-        """Select a request and open its service details."""
+        """Select a request and start local/mock attendance flow."""
         request = next((item for item in self.available_requests if item["id"] == request_id), None)
         if request is None:
             return rx.toast("Solicitação não encontrada.")
         self.selected_request = request
+        provider = next((item for item in self.providers if item["id"] == self.current_provider_id), None)
+        provider_coords = provider["coords"] if provider else [-23.5505, -46.6333]
+        self.atendimento_mock = build_atendimento_mock(request, provider_coords)
+        self.atendimento_phase = "A_CAMINHO"
+        self.show_cancel_confirm = False
         self.available_requests = [item for item in self.available_requests if item["id"] != request_id]
-        return rx.redirect("/service-details")
+        return rx.redirect("/provider-service-progress")
 
     def refuse_request(self, request_id: int):
         """Remove a request from the provider's local queue."""
@@ -357,6 +390,95 @@ class OperationalState(rx.State):
         """Restore the provider home presentation after returning from details."""
         self.is_available = True
         self.selected_request = {}
+
+    def reset_atendimento(self):
+        """Clear current attendance local/mock data."""
+        self.selected_request = {}
+        self.atendimento_mock = {}
+        self.atendimento_phase = ""
+        self.show_cancel_confirm = False
+
+    @rx.var
+    def atendimento_next_action_label(self) -> str:
+        """Return the main CTA label based on current attendance phase."""
+        if self.atendimento_phase == "A_CAMINHO":
+            return "Cheguei ao local"
+        if self.atendimento_phase == "NO_LOCAL":
+            return "Iniciar atendimento"
+        if self.atendimento_phase == "ATENDENDO":
+            return "Concluir atendimento"
+        return "Atendimento concluído"
+
+    @rx.var
+    def atendimento_status_text(self) -> str:
+        """Human readable attendance phase label."""
+        if self.atendimento_phase == "A_CAMINHO":
+            return "A caminho"
+        if self.atendimento_phase == "NO_LOCAL":
+            return "No local"
+        if self.atendimento_phase == "ATENDENDO":
+            return "Atendendo"
+        if self.atendimento_phase == "CONCLUIDO":
+            return "Concluído"
+        return "Sem atendimento"
+
+    @rx.var
+    def can_cancel_atendimento(self) -> bool:
+        """Allow cancellation only in first phases."""
+        return self.atendimento_phase in ["A_CAMINHO", "NO_LOCAL"]
+
+    @rx.var
+    def atendimento_provider_coords(self) -> list[float]:
+        """Provider coordinates for the current attendance map route."""
+        return self.atendimento_mock.get("provider_coords", [-23.5505, -46.6333])
+
+    @rx.var
+    def atendimento_user_coords(self) -> list[float]:
+        """User coordinates for the current attendance map route."""
+        return self.atendimento_mock.get("user_coords", [-23.5614, -46.6559])
+
+    @rx.var
+    def atendimento_route_script(self) -> str:
+        """Script that initializes map and renders the current route."""
+        provider = self.atendimento_provider_coords
+        user = self.atendimento_user_coords
+        return (
+            "window.initSOSMap('provider-service-progress-map', "
+            f"[{provider[0]}, {provider[1]}], 13);"
+            "window.showSOSRoute('provider-service-progress-map', "
+            f"[{provider[0]}, {provider[1]}], "
+            f"[{user[0]}, {user[1]}]);"
+        )
+
+    def open_cancel_confirm(self):
+        """Open cancellation confirmation modal."""
+        self.show_cancel_confirm = True
+
+    def close_cancel_confirm(self):
+        """Close cancellation confirmation modal."""
+        self.show_cancel_confirm = False
+
+    def confirm_cancel_atendimento(self):
+        """Cancel attendance, clear mock and return to provider home."""
+        self.reset_atendimento()
+        return rx.redirect("/home_provider")
+
+    def advance_atendimento_phase(self):
+        """Advance through mock attendance phases in strict sequence."""
+        if self.atendimento_phase == "A_CAMINHO":
+            self.atendimento_phase = "NO_LOCAL"
+            return
+        if self.atendimento_phase == "NO_LOCAL":
+            self.atendimento_phase = "ATENDENDO"
+            return
+        if self.atendimento_phase == "ATENDENDO":
+            self.atendimento_phase = "CONCLUIDO"
+            return rx.redirect("/service-finalized")
+
+    def finish_atendimento_and_back_home(self):
+        """Leave finalization screen and return to provider home."""
+        self.reset_atendimento()
+        return rx.redirect("/home_provider")
 
     def update_provider_location(self, provider_id: int, lat: float, lng: float):
         """Update a provider's real-time location."""
@@ -2079,6 +2201,275 @@ def service_details_screen() -> rx.Component:
     )
 
 
+def provider_service_progress_screen() -> rx.Component:
+    """Full-screen attendance view after provider accepts a request."""
+    return rx.box(
+        rx.box(
+            id="provider-service-progress-map",
+            width="100%",
+            height="100vh",
+            on_mount=rx.call_script(OperationalState.atendimento_route_script),
+        ),
+        rx.hstack(
+            rx.button(
+                "← Home",
+                on_click=rx.redirect("/home_provider"),
+                class_name="secondary-button",
+                size="1",
+            ),
+            rx.spacer(),
+            profile_avatar(),
+            position="absolute",
+            top="1rem",
+            left="1rem",
+            right="1rem",
+            z_index="100",
+            align="center",
+        ),
+        rx.box(
+            rx.text(
+                OperationalState.atendimento_status_text,
+                font_size="0.8rem",
+                font_weight="bold",
+                color=COLORS["emergency_orange"],
+                letter_spacing="0.08em",
+                text_transform="uppercase",
+            ),
+            rx.text(
+                rx.cond(
+                    OperationalState.atendimento_mock,
+                    OperationalState.atendimento_mock["tipo_problema"],
+                    "Atendimento",
+                ),
+                font_size="1rem",
+                font_weight="bold",
+                color=COLORS["navy"],
+            ),
+            rx.text(
+                rx.cond(
+                    OperationalState.atendimento_mock,
+                    f"Distância {OperationalState.atendimento_mock['distance']} • ETA {OperationalState.atendimento_mock['eta']}",
+                    "Distância 0.0 km • ETA 0 min",
+                ),
+                font_size="0.85rem",
+                color=COLORS["muted"],
+            ),
+            class_name="glass-panel",
+            border_radius="14px",
+            padding="0.7rem 0.9rem",
+            position="absolute",
+            top="5rem",
+            left="50%",
+            transform="translateX(-50%)",
+            z_index="110",
+            width="auto",
+        ),
+        rx.vstack(
+            rx.box(
+                rx.vstack(
+                    rx.hstack(
+                        rx.box(
+                            rx.text(
+                                rx.cond(
+                                    OperationalState.atendimento_mock,
+                                    OperationalState.atendimento_mock["service_icon"],
+                                    "🛠️",
+                                ),
+                                font_size="1.5rem",
+                            ),
+                            width="3rem",
+                            height="3rem",
+                            display="flex",
+                            align_items="center",
+                            justify_content="center",
+                            background="#FFF7ED",
+                            border_radius="12px",
+                        ),
+                        rx.vstack(
+                            rx.text(
+                                rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["nome"], "Cliente"),
+                                font_size="1rem",
+                                font_weight="bold",
+                                color=COLORS["navy"],
+                            ),
+                            rx.text(
+                                rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["tipo_problema"], "Solicitação"),
+                                font_size="0.9rem",
+                                color=COLORS["text"],
+                            ),
+                            align="start",
+                            spacing="0",
+                        ),
+                        spacing="3",
+                        align="center",
+                        width="100%",
+                    ),
+                    rx.vstack(
+                        rx.text("Veículo", class_name="field-label"),
+                        rx.text(
+                            rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["veiculo"], "Não informado"),
+                            color=COLORS["text"],
+                        ),
+                        rx.text("Endereço", class_name="field-label"),
+                        rx.text(
+                            rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["endereco"], "Não informado"),
+                            color=COLORS["text"],
+                        ),
+                        rx.text("Observação", class_name="field-label"),
+                        rx.text(
+                            rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["observacao"], "Sem observações."),
+                            color=COLORS["muted"],
+                        ),
+                        align="start",
+                        spacing="1",
+                        width="100%",
+                    ),
+                    rx.hstack(
+                        rx.cond(
+                            OperationalState.can_cancel_atendimento,
+                            rx.button(
+                                "Cancelar atendimento",
+                                on_click=OperationalState.open_cancel_confirm,
+                                class_name="secondary-button",
+                                flex="1",
+                            ),
+                        ),
+                        rx.button(
+                            OperationalState.atendimento_next_action_label,
+                            on_click=OperationalState.advance_atendimento_phase,
+                            class_name="primary-button",
+                            flex="1",
+                        ),
+                        width="100%",
+                        spacing="3",
+                    ),
+                    spacing="4",
+                    width="100%",
+                ),
+                class_name="op-card",
+                width="100%",
+                max_width="42rem",
+            ),
+            width="100%",
+            align="center",
+            position="absolute",
+            left="0",
+            right="0",
+            bottom="1rem",
+            z_index="120",
+            padding_x="1rem",
+        ),
+        rx.cond(
+            OperationalState.show_cancel_confirm,
+            rx.box(
+                rx.box(
+                    rx.vstack(
+                        rx.heading("Cancelar atendimento", size="5", color=COLORS["navy"]),
+                        rx.text("Tem certeza que quer cancelar?", color=COLORS["text"]),
+                        rx.hstack(
+                            rx.button(
+                                "Voltar",
+                                on_click=OperationalState.close_cancel_confirm,
+                                class_name="secondary-button",
+                                width="100%",
+                            ),
+                            rx.button(
+                                "Sim, cancelar",
+                                on_click=OperationalState.confirm_cancel_atendimento,
+                                class_name="primary-button",
+                                width="100%",
+                            ),
+                            spacing="3",
+                            width="100%",
+                        ),
+                        spacing="4",
+                        width="100%",
+                        align="start",
+                    ),
+                    width="min(100%, 24rem)",
+                    background="white",
+                    border_radius="16px",
+                    padding="1.2rem",
+                    box_shadow="0 20px 50px rgba(0,0,0,0.25)",
+                ),
+                position="fixed",
+                inset="0",
+                z_index="130",
+                display="flex",
+                align_items="center",
+                justify_content="center",
+                background="rgba(2,6,23,0.5)",
+                padding="1rem",
+            ),
+        ),
+        width="100%",
+        height="100vh",
+        position="relative",
+        overflow="hidden",
+        background=COLORS["background"],
+    )
+
+
+def service_finalized_screen() -> rx.Component:
+    """Simple finalization summary after completing attendance."""
+    return rx.center(
+        rx.vstack(
+            rx.text("atendimento finalizado", class_name="section-kicker"),
+            rx.heading("Chamado concluído com sucesso", class_name="section-title", size="7"),
+            rx.text(
+                "O atendimento foi encerrado e você já pode aceitar novos chamados.",
+                class_name="section-intro",
+                text_align="center",
+            ),
+            rx.box(
+                rx.vstack(
+                    rx.text(
+                        rx.cond(
+                            OperationalState.atendimento_mock,
+                            f"Cliente: {OperationalState.atendimento_mock['nome']}",
+                            "Cliente: -",
+                        ),
+                        color=COLORS["text"],
+                    ),
+                    rx.text(
+                        rx.cond(
+                            OperationalState.atendimento_mock,
+                            f"Serviço: {OperationalState.atendimento_mock['tipo_problema']}",
+                            "Serviço: -",
+                        ),
+                        color=COLORS["text"],
+                    ),
+                    rx.text(
+                        rx.cond(
+                            OperationalState.atendimento_mock,
+                            f"Endereço: {OperationalState.atendimento_mock['endereco']}",
+                            "Endereço: -",
+                        ),
+                        color=COLORS["muted"],
+                    ),
+                    align="start",
+                    spacing="1",
+                ),
+                class_name="op-card",
+                width="100%",
+            ),
+            rx.button(
+                "Voltar para Home do Colaborador",
+                on_click=OperationalState.finish_atendimento_and_back_home,
+                class_name="primary-button",
+                width="100%",
+            ),
+            spacing="5",
+            width="min(100%, 38rem)",
+            align="start",
+            class_name="login-panel",
+        ),
+        min_height="100vh",
+        padding="1rem",
+        background=COLORS["background"],
+    )
+
+
 app = rx.App(
     style=GLOBAL_STYLE,
     head_components=[
@@ -2149,6 +2540,34 @@ app = rx.App(
             }
         };
 
+        window.showSOSRoute = function(mapId, startCoords, endCoords) {
+            const map = window.sosMaps[mapId];
+            if (!map) return;
+
+            if (window.sosRouteLine && map.hasLayer(window.sosRouteLine)) {
+                map.removeLayer(window.sosRouteLine);
+            }
+
+            const start = L.latLng(startCoords[0], startCoords[1]);
+            const end = L.latLng(endCoords[0], endCoords[1]);
+
+            L.marker(start, {
+                icon: L.divIcon({ className: "provider-marker", html: "🛠️" })
+            }).addTo(map).bindPopup("Você (colaborador)");
+
+            L.marker(end, {
+                icon: L.divIcon({ className: "user-marker", html: "🔵" })
+            }).addTo(map).bindPopup("Usuário socorrido");
+
+            window.sosRouteLine = L.polyline([start, end], {
+                color: "#F97316",
+                weight: 5,
+                opacity: 0.85,
+            }).addTo(map);
+
+            map.fitBounds(window.sosRouteLine.getBounds(), { padding: [40, 40] });
+        };
+
         window.triggerReflexUpdate = function(data) {
             const input = document.getElementById('lat-lng-trigger');
             if (!input) return;
@@ -2179,5 +2598,7 @@ app.add_page(customer_dashboard, route="/customer", title="Dashboard Cliente | S
 app.add_page(provider_dashboard, route="/provider", title="Dashboard Prestador | SOS Drive")
 app.add_page(provider_home_screen, route="/home_provider", title="Solicitações Próximas | SOS Drive")
 app.add_page(service_details_screen, route="/service-details", title="Detalhes do Atendimento | SOS Drive")
+app.add_page(provider_service_progress_screen, route="/provider-service-progress", title="Atendimento em Andamento | SOS Drive")
+app.add_page(service_finalized_screen, route="/service-finalized", title="Chamado Finalizado | SOS Drive")
 app.add_page(profile_screen, route="/profile", title="Meu Perfil | SOS Drive")
 app.add_page(map_test_screen, route="/test-map", title="Teste de Mapa | SOS Drive")

@@ -23,3 +23,14 @@
 - [x] Update `home_screen()` to redirect to `/home_client` or `/home_provider` based on `user_role`.
 - [x] Add pages to `app.add_page`.
 - [ ] Test navigation flow: Login $\rightarrow$ Home $\rightarrow$ Map.
+
+## Phase 5: Provider Attendance Flow (Post Accept)
+- [x] Update provider spec with post-accept attendance behavior.
+- [x] Add local/mock attendance state with strict phases: `A_CAMINHO -> NO_LOCAL -> ATENDENDO -> CONCLUIDO`.
+- [x] Integrate `Aceitar` from provider home with attendance flow navigation.
+- [x] Implement full-screen attendance page with reused map and route rendering.
+- [x] Show fixed card with rescued user data: nome, problema, veículo, endereço, observação.
+- [x] Implement phase-based primary CTA labels and sequential transitions.
+- [x] Implement cancel confirmation modal and cancel flow back to provider home.
+- [x] Navigate to finalization screen on conclude.
+- [ ] Run verification for provider flow transitions and navigation.
