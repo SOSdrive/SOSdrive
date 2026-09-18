@@ -1,12 +1,14 @@
-"""SOS Drive Reflex application."""
-
 from __future__ import annotations
 
-import os
-from pathlib import Path
+"""SOS Drive Reflex application."""
+
 
 import reflex as rx
 import requests
+import os
+import math
+import time
+import asyncio
 
 from styles import GLOBAL_STYLE, COLORS
 
@@ -44,6 +46,7 @@ class AppState(rx.State):
     """Application state for navigation and driver authentication."""
 
     screen: str = "presentation"
+    user_role: str = "client" # Added to track role
     email: str = ""
     password: str = ""
     signup_name: str = ""
@@ -56,15 +59,27 @@ class AppState(rx.State):
     signup_message: str = ""
     is_loading: bool = False
 
+    # Profile Fields (Mock)
+    user_profile_photo: str = ""
+    user_full_name: str = "Usuário SOS"
+    user_email: str = "usuario@exemplo.com"
+    user_phone: str = "(11) 99999-9999"
+
+    @rx.var
+    def user_initials(self) -> str:
+        """Compute initials from user_full_name."""
+        names = self.user_full_name.split()
+        if not names:
+            return "U"
+        first = names[0][0].upper()
+        last = names[-1][0].upper() if len(names) > 1 else ""
+        return f"{first}{last}"
+
     def open_signup(self) -> None:
-        self.screen = "signup"
-        self.error_message = ""
-        self.signup_message = ""
+        return rx.redirect("/signup")
 
     def open_login(self) -> None:
-        self.screen = "login"
-        self.error_message = ""
-        self.signup_message = ""
+        return rx.redirect("/login")
 
     def choose_signup_role(self, role: str) -> None:
         if role in {"client", "provider"}:
@@ -96,17 +111,12 @@ class AppState(rx.State):
         self.password = value
 
     def return_to_presentation(self) -> None:
-        self.screen = "presentation"
-        self.error_message = ""
-        self.signup_message = ""
-        self.password = ""
-        self.signup_password = ""
+        return rx.redirect("/")
 
     def open_map_test(self) -> None:
-        self.screen = "map_test"
+        return rx.redirect("/test-map")
 
     def logout(self) -> None:
-        self.screen = "presentation"
         self.auth_token = ""
         self.user_id = None
         self.email = ""
@@ -116,6 +126,7 @@ class AppState(rx.State):
         self.signup_password = ""
         self.error_message = ""
         self.signup_message = ""
+        return rx.redirect("/")
 
     def get_xano_api_url(self) -> str:
         return os.getenv("XANO_API_URL", "").strip().rstrip("/")
@@ -135,7 +146,7 @@ class AppState(rx.State):
             auth_token, user_id = login_with_xano(self.email, self.password, api_url)
             self.auth_token = auth_token
             self.user_id = user_id
-            self.screen = "authenticated"
+            return rx.redirect("/home")
         except PermissionError:
             self.error_message = "Email ou senha inválidos."
         except (requests.RequestException, ValueError):
@@ -146,11 +157,29 @@ class AppState(rx.State):
 
     def bypass_login_client(self) -> None:
         """Bypass login for testing as a client."""
-        self.screen = "authenticated"
+        self.user_role = "client"
+        return rx.redirect("/home")
 
     def bypass_login_provider(self) -> None:
         """Bypass login for testing as a provider."""
-        self.screen = "provider_dash"
+        self.user_role = "provider"
+        return rx.redirect("/home")
+
+    def set_user_full_name(self, value: str) -> None:
+        self.user_full_name = value
+
+    def set_user_email(self, value: str) -> None:
+        self.user_email = value
+
+    def set_user_phone(self, value: str) -> None:
+        self.user_phone = value
+
+    def handle_profile_upload(self):
+        """Mock upload handler: just sets a placeholder image."""
+        # In a real app, we'd handle the upload via rx.upload
+        # For mock, we just use a sample image.
+        self.user_profile_photo = "https://i.pravatar.cc/300"
+
 
 
 class OperationalState(rx.State):
@@ -164,11 +193,18 @@ class OperationalState(rx.State):
         {"id": 4, "name": "Carlos Guincho", "coords": [-23.5600, -46.6400], "specialties": ["mechanical", "fuel"], "status": "online"},
     ]
 
+    # Real-time tracking data
+    # { provider_id: {"lat": float, "lng": float, "timestamp": float} }
+    provider_locations: dict[int, dict] = {}
+    client_location: dict[str, float] = {"lat": 0.0, "lng": 0.0}
+    lat_lng_update_value: str = ""
+
     # Mock Data for Active Calls
     active_calls: list[dict] = [
         {"id": 101, "service_type": "Pneu Furado", "coords": [-23.5520, -46.6340], "status": "pending"},
         {"id": 102, "service_type": "Bateria", "coords": [-23.5580, -46.6310], "status": "pending"},
     ]
+
 
     # Customer Request state
     selected_service: str | None = None
@@ -177,6 +213,95 @@ class OperationalState(rx.State):
     # Provider identity (simulated)
     current_provider_id: int = 1
     current_provider_specialties: list[str] = ["tire", "battery"]
+    user_vehicles: list[dict] = [
+        {"id": 1, "brand": "Toyota", "model": "Corolla", "plate": "ABC-1234", "year": 2020, "color": "Prata"},
+    ]
+    # Modal state for vehicles
+    show_vehicle_modal: bool = False
+    editing_vehicle_id: int | None = None
+    v_brand: str = ""
+    v_model: str = ""
+    v_plate: str = ""
+    v_year: int = 2024
+    v_color: str = ""
+
+    def add_vehicle(self, brand: str, model: str, plate: str, year: int, color: str):
+        """Add a new vehicle to the local mock list."""
+        new_id = max([v["id"] for v in self.user_vehicles], default=0) + 1
+        self.user_vehicles.append({
+            "id": new_id,
+            "brand": brand,
+            "model": model,
+            "plate": plate,
+            "year": year,
+            "color": color,
+        })
+        self.user_vehicles = self.user_vehicles # Trigger state update
+
+    def update_vehicle(self, vehicle_id: int, brand: str, model: str, plate: str, year: int, color: str):
+        """Update an existing vehicle in the local mock list."""
+        for v in self.user_vehicles:
+            if v["id"] == vehicle_id:
+                v.update({"brand": brand, "model": model, "plate": plate, "year": year, "color": color})
+        self.user_vehicles = self.user_vehicles # Trigger state update
+
+    def set_v_brand(self, v: str):
+        self.v_brand = v
+
+    def set_v_model(self, v: str):
+        self.v_model = v
+
+    def set_v_plate(self, v: str):
+        self.v_plate = v
+
+    def set_v_year(self, v: str):
+        try:
+            self.v_year = int(v)
+        except ValueError:
+            pass
+
+    def set_v_color(self, v: str):
+        self.v_color = v
+
+    def delete_vehicle(self, vehicle_id: int):
+        """Remove a vehicle from the local mock list."""
+        self.user_vehicles = [v for v in self.user_vehicles if v["id"] != vehicle_id]
+
+    def open_vehicle_modal(self, vehicle_id: int | None = None):
+        """Open modal for creating or editing a vehicle."""
+        self.show_vehicle_modal = True
+        self.editing_vehicle_id = vehicle_id
+        if vehicle_id:
+            v = next((v for v in self.user_vehicles if v["id"] == vehicle_id), None)
+            if v:
+                self.v_brand = v["brand"]
+                self.v_model = v["model"]
+                self.v_plate = v["plate"]
+                self.v_year = v["year"]
+                self.v_color = v["color"]
+        else:
+            self.v_brand = ""
+            self.v_model = ""
+            self.v_plate = ""
+            self.v_year = 2024
+            self.v_color = ""
+
+    def close_vehicle_modal(self):
+        self.show_vehicle_modal = False
+        self.editing_vehicle_id = None
+
+    def save_vehicle(self):
+        """Save vehicle data (create or update)."""
+        if not self.v_plate or not self.v_brand or not self.v_model:
+            return # Simple validation
+
+        if self.editing_vehicle_id:
+            self.update_vehicle(self.editing_vehicle_id, self.v_brand, self.v_model, self.v_plate, self.v_year, self.v_color)
+        else:
+            self.add_vehicle(self.v_brand, self.v_model, self.v_plate, self.v_year, self.v_color)
+
+        self.close_vehicle_modal()
+
 
     def toggle_provider_status(self):
         """Toggle status of the current simulated provider."""
@@ -184,6 +309,98 @@ class OperationalState(rx.State):
             if p["id"] == self.current_provider_id:
                 p["status"] = "offline" if p["status"] == "online" else "online"
         self.providers = self.providers # Trigger state update
+
+    def update_provider_location(self, provider_id: int, lat: float, lng: float):
+        """Update a provider's real-time location."""
+        self.provider_locations[provider_id] = {
+            "lat": lat,
+            "lng": lng,
+            "timestamp": time.time(),
+        }
+        # Update the mock list for consistency
+        for p in self.providers:
+            if p["id"] == provider_id:
+                p["coords"] = [lat, lng]
+
+        self.provider_locations = self.provider_locations
+        self.providers = self.providers
+
+    def update_client_location(self, lat: float, lng: float):
+        """Update the client's real-time location."""
+        self.client_location = {"lat": lat, "lng": lng}
+
+    def handle_lat_lng_update(self, value: str):
+        """Handle location updates from the JS bridge via a hidden input."""
+        import json
+        try:
+            data = json.loads(value)
+            lat = data.get("lat")
+            lng = data.get("lng")
+            role = data.get("role")
+            provider_id = data.get("provider_id")
+
+            if role == "client":
+                self.update_client_location(lat, lng)
+            elif role == "provider" and provider_id is not None:
+                self.update_provider_location(provider_id, lat, lng)
+        except Exception as e:
+            print(f"Error parsing location update: {e}")
+        finally:
+            self.lat_lng_update_value = "" # Clear to allow same-value updates
+
+    @rx.var
+    def client_center(self) -> list[float]:
+        """Return client location as a list for Leaflet center."""
+        return [self.client_location["lat"], self.client_location["lng"]]
+
+    @rx.var
+    def nearby_providers(self) -> list[dict]:
+        """Return providers within a 5km radius of the client."""
+        if self.client_location["lat"] == 0.0:
+            return []
+
+        nearby = []
+        for p in self.providers:
+            if p["status"] == "online":
+                # Use real-time location if available, otherwise use mock coords
+                coords = self.provider_locations.get(p["id"], {}).get("coords", p["coords"])
+                # Wait, I stored them as lat/lng keys in provider_locations
+                loc = self.provider_locations.get(p["id"], {})
+                lat = loc.get("lat", p["coords"][0])
+                lng = loc.get("lng", p["coords"][1])
+
+                dist = self._haversine(
+                    self.client_location["lat"], self.client_location["lng"],
+                    lat, lng
+                )
+                if dist <= 5.0:
+                    nearby.append({**p, "distance": round(dist, 2), "lat": lat, "lng": lng})
+
+        return sorted(nearby, key=lambda x: x["distance"])
+
+    def _haversine(self, lat1, lon1, lat2, lon2) -> float:
+        """Calculate the great circle distance between two points in km."""
+        R = 6371.0
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
+        return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    @rx.event(background=True)
+    async def cleanup_stale_providers(self):
+        """Background task to remove providers who haven't updated in 5 minutes."""
+        while True:
+            await asyncio.sleep(60)
+            async with self:
+                now = time.time()
+                # Mark providers offline if no update for 300s
+                for p in self.providers:
+                    loc = self.provider_locations.get(p["id"], {})
+                    if loc.get("timestamp", 0) < now - 300:
+                        p["status"] = "offline"
+                self.providers = self.providers
+
 
     def submit_customer_request(self, service_type: str):
         """Simulate the process of requesting help."""
@@ -247,103 +464,6 @@ class OperationalState(rx.State):
         self.active_calls.append(new_call)
         self.active_calls = self.active_calls # Trigger state update
 
-    def open_signup(self) -> None:
-        self.screen = "signup"
-        self.error_message = ""
-        self.signup_message = ""
-
-    def open_login(self) -> None:
-        self.screen = "login"
-        self.error_message = ""
-        self.signup_message = ""
-
-    def choose_signup_role(self, role: str) -> None:
-        if role in {"client", "provider"}:
-            self.signup_role = role
-
-    def set_signup_name(self, value: str) -> None:
-        self.signup_name = value
-
-    def set_signup_email(self, value: str) -> None:
-        self.signup_email = value
-
-    def set_signup_password(self, value: str) -> None:
-        self.signup_password = value
-
-    def submit_signup(self) -> None:
-        self.signup_message = ""
-        self.error_message = ""
-        self.error_message = validate_signup(self.signup_name, self.signup_email, self.signup_password)
-        if self.error_message:
-            self.signup_password = ""
-            return
-        self.signup_message = "Cadastro preparado. A conexão com o banco será adicionada na próxima etapa."
-        self.signup_password = ""
-
-    def set_email_value(self, value: str) -> None:
-        self.email = value
-
-    def set_password_value(self, value: str) -> None:
-        self.password = value
-
-    def return_to_presentation(self) -> None:
-        self.screen = "presentation"
-        self.error_message = ""
-        self.signup_message = ""
-        self.password = ""
-        self.signup_password = ""
-
-    def open_map_test(self) -> None:
-        self.screen = "map_test"
-
-    def logout(self) -> None:
-        self.screen = "presentation"
-        self.auth_token = ""
-        self.user_id = None
-        self.email = ""
-        self.password = ""
-        self.signup_name = ""
-        self.signup_email = ""
-        self.signup_password = ""
-        self.error_message = ""
-        self.signup_message = ""
-
-    def get_xano_api_url(self) -> str:
-        return os.getenv("XANO_API_URL", "").strip().rstrip("/")
-
-    def login(self) -> None:
-        """Authenticate through Xano without retaining the submitted password."""
-        self.error_message = ""
-        self.is_loading = True
-        api_url = self.get_xano_api_url()
-        if not api_url:
-            self.error_message = "O login ainda não está configurado neste ambiente."
-            self.password = ""
-            self.is_loading = False
-            return
-
-        try:
-            auth_token, user_id = login_with_xano(self.email, self.password, api_url)
-            self.auth_token = auth_token
-            self.user_id = user_id
-            self.screen = "authenticated"
-        except PermissionError:
-            self.error_message = "Email ou senha inválidos."
-        except (requests.RequestException, ValueError):
-            self.error_message = "Não foi possível conectar ao serviço de login. Tente novamente."
-        finally:
-            self.password = ""
-            self.is_loading = False
-
-    def bypass_login_client(self) -> None:
-        """Bypass login for testing as a client."""
-        self.screen = "authenticated"
-
-    def bypass_login_provider(self) -> None:
-        """Bypass login for testing as a provider."""
-        self.screen = "provider_dash"
-
-
 def text_input(label: str, placeholder: str, value: str, on_change) -> rx.Component:
     return rx.vstack(
         rx.text(label, class_name="field-label"),
@@ -361,6 +481,181 @@ def text_input(label: str, placeholder: str, value: str, on_change) -> rx.Compon
         ),
         width="100%",
         spacing="2",
+    )
+
+
+def profile_avatar() -> rx.Component:
+    """Circular profile avatar that redirects to the profile page."""
+    return rx.button(
+        rx.cond(
+            AppState.user_profile_photo != "",
+            rx.image(
+                src=AppState.user_profile_photo,
+                width="100%",
+                height="100%",
+                border_radius="50%",
+                object_fit="cover"
+            ),
+            rx.center(
+                rx.text(
+                    AppState.user_initials,
+                    font_size="0.9rem",
+                    weight="bold",
+                    color=COLORS["text"]
+                ),
+                width="100%",
+                height="100%",
+                background=COLORS["line"],
+                border_radius="50%",
+            ),
+        ),
+        on_click=rx.redirect("/profile"),
+        class_name="glass-panel",
+        padding="0",
+        border_radius="50%",
+        width="2.8rem",
+        height="2.8rem",
+        cursor="pointer",
+        overflow="hidden",
+    )
+
+
+def vehicle_card(v: dict) -> rx.Component:
+    """Card for displaying a single vehicle."""
+    return rx.box(
+        rx.hstack(
+            rx.vstack(
+                rx.text(f"{v['brand']} {v['model']}", weight="bold", size="3"),
+                rx.text(f"Placa: {v['plate']}", font_size="0.8rem", color=COLORS["text"]),
+                align="start",
+                spacing="1",
+            ),
+            rx.spacer(),
+            rx.hstack(
+                rx.button(
+                    "✏️",
+                    on_click=lambda: OperationalState.open_vehicle_modal(v["id"]),
+                    class_name="glass-panel",
+                    padding="0.4rem",
+                    border_radius="8px",
+                    width="2.2rem",
+                    height="2.2rem",
+                ),
+                rx.button(
+                    "🗑️",
+                    on_click=lambda: OperationalState.delete_vehicle(v["id"]),
+                    class_name="glass-panel",
+                    padding="0.4rem",
+                    border_radius="8px",
+                    width="2.2rem",
+                    height="2.2rem",
+                ),
+                spacing="2",
+            ),
+            width="100%",
+            align="center",
+            padding="1rem",
+            background="white",
+            border_radius="12px",
+            border=f"1px solid {COLORS['line']}",
+        ),
+    )
+
+
+def vehicle_modal() -> rx.Component:
+    """Modal for adding or editing a vehicle."""
+    return rx.cond(
+        OperationalState.show_vehicle_modal,
+        rx.box(
+            rx.box(
+                rx.vstack(
+                    rx.heading(
+                        rx.cond(OperationalState.editing_vehicle_id, "Editar Veículo", "Adicionar Veículo"),
+                        size="5",
+                        margin_bottom="1rem",
+                    ),
+                    rx.vstack(
+                        rx.text("Marca", class_name="field-label"),
+                        rx.input(
+                            value=OperationalState.v_brand,
+                            on_change=OperationalState.set_v_brand,
+                            width="100%",
+                            border_radius="12px",
+                        ),
+                        width="100%",
+                    ),
+                    rx.vstack(
+                        rx.text("Modelo", class_name="field-label"),
+                        rx.input(
+                            value=OperationalState.v_model,
+                            on_change=OperationalState.set_v_model,
+                            width="100%",
+                            border_radius="12px",
+                        ),
+                        width="100%",
+                    ),
+                    rx.vstack(
+                        rx.text("Placa", class_name="field-label"),
+                        rx.input(
+                            value=OperationalState.v_plate,
+                            on_change=OperationalState.set_v_plate,
+                            width="100%",
+                            border_radius="12px",
+                        ),
+                        width="100%",
+                    ),
+                    rx.hstack(
+                        rx.vstack(
+                            rx.text("Ano", class_name="field-label"),
+                            rx.input(
+                                value=str(OperationalState.v_year),
+                                on_change=OperationalState.set_v_year,
+                                width="100%",
+                                border_radius="12px",
+                            ),
+                            width="50%",
+                        ),
+                        rx.vstack(
+                            rx.text("Cor", class_name="field-label"),
+                            rx.input(
+                                value=OperationalState.v_color,
+                                on_change=OperationalState.set_v_color,
+                                width="100%",
+                                border_radius="12px",
+                            ),
+                            width="50%",
+                        ),
+                        spacing="3",
+                        width="100%",
+                    ),
+                    rx.hstack(
+                        rx.button("Cancelar", on_click=OperationalState.close_vehicle_modal, class_name="secondary-button", width="100%"),
+                        rx.button("Salvar", on_click=OperationalState.save_vehicle, class_name="primary-button", width="100%"),
+                        spacing="3",
+                        width="100%",
+                        margin_top="1rem",
+                    ),
+                    spacing="4",
+                    width="100%",
+                ),
+                padding="2rem",
+                background="white",
+                border_radius="24px",
+                width="min(100%, 24rem)",
+                box_shadow="0 20px 50px rgba(0,0,0,0.2)",
+            ),
+            position="fixed",
+            top="0",
+            left="0",
+            right="0",
+                bottom="0",
+            z_index="1000",
+            background="rgba(0,0,0,0.5)",
+            backdrop_filter="blur(4px)",
+            display="flex",
+            align_items="center",
+            justify_content="center",
+        ),
     )
 
 
@@ -554,12 +849,25 @@ def hero_visual() -> rx.Component:
     return rx.box(
         rx.vstack(
             rx.hstack(
-                rx.text("visão da assistência", class_name="visual-label"),
-                rx.text("● online", class_name="live-label"),
+                rx.text("VISÃO EM TEMPO REAL", class_name="visual-label"),
+                rx.hstack(
+                    rx.text("●", color="#22C55E"),
+                    rx.text("SISTEMA ATIVO", class_name="live-label", font_size="0.7rem", font_weight="bold"),
+                    spacing="1",
+                    align="center",
+                ),
                 justify="between",
                 width="100%",
             ),
-            rx.box(rx.text("Sua localização atual", class_name="map-label"), class_name="map-preview"),
+            rx.box(
+                rx.hstack(
+                    rx.text("📍", font_size="1.2rem"),
+                    rx.text("Sua localização atual", class_name="map-label"),
+                    spacing="2",
+                    align="center",
+                ),
+                class_name="map-preview",
+            ),
             rx.hstack(
                 rx.box("↗", class_name="assist-icon"),
                 rx.vstack(
@@ -571,7 +879,7 @@ def hero_visual() -> rx.Component:
                 class_name="assist-card",
                 width="100%",
             ),
-            rx.text("3 opções encontradas", class_name="mini-stats"),
+            rx.text("3 profissionais disponíveis na sua região", class_name="mini-stats"),
             class_name="visual-content",
             width="100%",
         ),
@@ -605,6 +913,23 @@ def landing_page() -> rx.Component:
                         wrap="wrap",
                         spacing="3",
                     ),
+                    rx.hstack(
+                        rx.link(
+                            "Conhecer a SOS Drive",
+                            href="/login",
+                            class_name="primary-button",
+                            flex="1",
+                            text_align="center",
+                            display="flex",
+                            align_items="center",
+                            justify_content="center",
+                            width="100%",
+                        ),
+                        rx.button("Ver mapa (Teste)", on_click=AppState.open_map_test, class_name="secondary-button", flex="1"),
+                        width="100%",
+                        spacing="3",
+                        margin_top="1rem",
+                    ),
                     align="start",
                     spacing="6",
                 ),
@@ -615,12 +940,6 @@ def landing_page() -> rx.Component:
             ),
             class_name="hero-shell",
             width="100%",
-        ),
-        rx.hstack(
-            rx.button("Conhecer a SOS Drive", on_click=AppState.open_signup, class_name="primary-button", flex="1"),
-            rx.button("Ver mapa (Teste)", on_click=AppState.open_map_test, class_name="secondary-button", flex="1"),
-            width="100%",
-            spacing="3",
         ),
 
         rx.text("uma jornada mais leve", class_name="section-kicker"),
@@ -667,169 +986,228 @@ def customer_dashboard() -> rx.Component:
     return rx.box(
         # Map Container (Background)
         rx.box(
-            rx.html(
-                '<div id="customer-map" style="height: 100vh; width: 100vw; position: absolute; top: 0; left: 0; z-index: 0; background: #f3f4f6;"></div>'
-                '<script>'
-                'function initCustomerMap() {'
-                '  var cMap = L.map("customer-map", { zoomControl: false }).setView([-23.5505, -46.6333], 13);'
-                '  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "" }).addTo(cMap);'
-                '  L.marker([-23.5505, -46.6333], { icon: L.divIcon({ className: "user-marker", html: "🔵" }) }).addTo(cMap).bindPopup("Você está aqui");'
-                '  var providers = ['
-                '    {name: "João", coords: [-23.5520, -46.6340]},'
-                '    {name: "Maria", coords: [-23.5580, -46.6310]},'
-                '    {name: "Carlos", coords: [-23.5480, -46.6380]}'
-                '  ];'
-                '  providers.forEach(p => L.marker(p.coords).addTo(cMap).bindPopup(p.name));'
-                '}'
-                'setTimeout(initCustomerMap, 100);'
-                '</script>',
-            ),
+            id="customer-map",
             width="100%",
             height="100vh",
             position="absolute",
             top="0",
             left="0",
             z_index="0",
-        ),
-        # UI Overlay
-        rx.box(
-            rx.vstack(
-                # Nearby Providers Counter
-                rx.box(
-                    rx.hstack(
-                        rx.text("📍", font_size="1.2rem"),
-                        rx.text(
-                            f"Existem {OperationalState.online_providers_count} prestadores online perto de você",
-                            weight="bold",
-                            font_size="0.9rem",
-                            color=COLORS["text"],
-                        ),
-                        spacing="2",
-                        align="center",
-                    ),
-                    class_name="glass-panel",
-                    padding="0.75rem 1.25rem",
-                    position="absolute",
-                    top="2rem",
-                    left="50%",
-                    transform="translateX(-50%)",
-                    z_index="20",
-                    width="auto",
-                    pointer_events="auto",
-                ),
-                # Bottom Sheet for Help Selection
-                rx.vstack(
-                    rx.text("Do que você precisa?", weight="bold", size="5", margin_bottom="1rem", color=COLORS["text"]),
-                    rx.grid(
-                        rx.button(
-                            rx.vstack(
-                                rx.text("🛞", font_size="1.5rem"),
-                                rx.text("Pneu Furado", font_size="0.8rem", color=COLORS["text"], weight="bold"),
-                            ),
-                            on_click=OperationalState.submit_customer_request("tire"),
-                            class_name="op-card",
-                            width="100%",
-                            height="80px",
-                            border_radius="16px",
-                            cursor="pointer",
-                        ),
-                        rx.button(
-                            rx.vstack(
-                                rx.text("🔋", font_size="1.5rem"),
-                                rx.text("Bateria", font_size="0.8rem", color=COLORS["text"], weight="bold"),
-                            ),
-                            on_click=OperationalState.submit_customer_request("battery"),
-                            class_name="op-card",
-                            width="100%",
-                            height="80px",
-                            border_radius="16px",
-                            cursor="pointer",
-                        ),
-                        rx.button(
-                            rx.vstack(
-                                rx.text("🔧", font_size="1.5rem"),
-                                rx.text("Mecânica", font_size="0.8rem", color=COLORS["text"], weight="bold"),
-                            ),
-                            on_click=OperationalState.submit_customer_request("mechanical"),
-                            class_name="op-card",
-                            width="100%",
-                            height="80px",
-                            border_radius="16px",
-                            cursor="pointer",
-                        ),
-                        rx.button(
-                            rx.vstack(
-                                rx.text("⛽", font_size="1.5rem"),
-                                rx.text("Combustível", font_size="0.8rem", color=COLORS["text"], weight="bold"),
-                            ),
-                            on_click=OperationalState.submit_customer_request("fuel"),
-                            class_name="op-card",
-                            width="100%",
-                            height="80px",
-                            border_radius="16px",
-                            cursor="pointer",
-                        ),
-                        columns="2",
-                        spacing="3",
-                        width="100%",
-                    ),
-                    # Request Status Overlay
-                    rx.cond(
-                        OperationalState.request_status == "searching",
-                        rx.vstack(
-                            rx.text("Buscando prestador...", weight="bold", color=COLORS["text"]),
-                            rx.spinner(size="1"),
-                            spacing="3",
-                            align="center",
-                            padding="1rem",
-                            width="100%",
-                            background="rgba(255,255,255,0.9)",
-                            border_radius="16px",
-                            margin_top="1rem",
-                        ),
-                    ),
-                    rx.cond(
-                        OperationalState.request_status == "matched",
-                        rx.vstack(
-                            rx.text("Prestador encontrado!", weight="bold", color=COLORS["emergency_orange"]),
-                            rx.text("João Socorro está a caminho", font_size="0.9rem", color=COLORS["text"]),
-                            rx.button("Cancelar Pedido", on_click=OperationalState.set_request_status("idle"), class_name="secondary-button", size="1"),
-                            spacing="3",
-                            align="center",
-                            padding="1rem",
-                            width="100%",
-                            background="rgba(255,255,255,0.9)",
-                            border_radius="16px",
-                            margin_top="1rem",
-                        ),
-                    ),
-                    width="100%",
-                    padding="1.5rem",
-                    background="rgba(255,255,255,0.8)",
-                    backdrop_filter="blur(15px)",
-                    border_radius="2rem 2rem 0 0",
-                    position="absolute",
-                    bottom="0",
-                    left="0",
-                    right="0",
-                    z_index="20",
-                    border="1px solid rgba(255,255,255,0.5)",
-                    box_shadow="0 -10px 30px rgba(0,0,0,0.1)",
-                    pointer_events="auto",
-                ),
-                width="100%",
-                height="100vh",
-                position="absolute",
-                top="0",
-                left="0",
-                z_index="10",
-                pointer_events="none",
+            on_mount=rx.call_script(
+                "window.initSOSMap('customer-map', [-23.5505, -46.6333], 13);"
             ),
+        ),
+        # Top Navigation Bar
+        rx.hstack(
+            rx.button(
+                rx.text("🏠 Home"),
+                on_click=rx.redirect("/home"),
+                class_name="glass-panel",
+                padding="0.5rem 1rem",
+                border_radius="12px",
+                font_size="0.8rem",
+                weight="bold",
+                cursor="pointer",
+            ),
+            rx.spacer(),
+            profile_avatar(),
+            position="absolute",
+            top="2rem",
+            left="2rem",
+            right="2rem",
+            z_index="100",
+            pointer_events="auto",
+            align="center",
+        ),
+        # Floating Status Pill
+        rx.box(
+            rx.hstack(
+                rx.text("📡", font_size="1.2rem"),
+                rx.text(
+                    f"{OperationalState.online_providers_count} profissionais disponíveis agora",
+                    weight="bold",
+                    font_size="0.85rem",
+                    color=COLORS["text"],
+                    text_align="center",
+                ),
+                spacing="2",
+                align="center",
+                justify="center",
+            ),
+            class_name="glass-panel",
+            padding="0.6rem 1.2rem",
+            position="absolute",
+            top="5.5rem",
+            left="50%",
+            transform="translateX(-50%)",
+            z_index="50",
+            width="auto",
+            max_width="90%",
+            pointer_events="auto",
+            border_radius="999px",
+        ),
+        # Center Map Button
+        rx.button(
+            "🎯",
+            on_click=rx.call_script("window.centerMap('customer-map')"),
+            class_name="glass-panel",
+            position="absolute",
+            bottom="15rem",
+            right="1rem",
+            z_index="100",
+            width="3rem",
+            height="3rem",
+            border_radius="50%",
+            pointer_events="auto",
+            cursor="pointer",
+            font_size="1.5rem",
+        ),
+        # Bottom Sheet for Help Selection
+        rx.vstack(
+            # Bottom sheet handle
+            rx.box(
+                width="40px",
+                height="4px",
+                background=COLORS["line"],
+                border_radius="2px",
+                margin_bottom="1.5rem",
+                align="center",
+            ),
+            rx.text("Do que você precisa?", weight="bold", size="6", margin_bottom="1rem", color=COLORS["text"], text_align="center"),
+            rx.grid(
+                rx.box(
+                    rx.vstack(
+                        rx.text("🚗", font_size="1.8rem"),
+                        rx.text("Pneu Furado", font_size="0.8rem", color=COLORS["text"], weight="bold", text_align="center"),
+                    ),
+                    on_click=OperationalState.submit_customer_request("tire"),
+                    class_name="op-card",
+                    width="100%",
+                    height="90px",
+                    border_radius="16px",
+                    cursor="pointer",
+                    align="center",
+                    justify="center",
+                ),
+                rx.box(
+                    rx.vstack(
+                        rx.text("🔋", font_size="1.8rem"),
+                        rx.text("Bateria", font_size="0.8rem", color=COLORS["text"], weight="bold", text_align="center"),
+                    ),
+                    on_click=OperationalState.submit_customer_request("battery"),
+                    class_name="op-card",
+                    width="100%",
+                    height="90px",
+                    border_radius="16px",
+                    cursor="pointer",
+                    align="center",
+                    justify="center",
+                ),
+                rx.box(
+                    rx.vstack(
+                        rx.text("🔧", font_size="1.8rem"),
+                        rx.text("Mecânica", font_size="0.8rem", color=COLORS["text"], weight="bold", text_align="center"),
+                    ),
+                    on_click=OperationalState.submit_customer_request("mechanical"),
+                    class_name="op-card",
+                    width="100%",
+                    height="90px",
+                    border_radius="16px",
+                    cursor="pointer",
+                    align="center",
+                    justify="center",
+                ),
+                rx.box(
+                    rx.vstack(
+                        rx.text("⛽", font_size="1.8rem"),
+                        rx.text("Combustível", font_size="0.8rem", color=COLORS["text"], weight="bold", text_align="center"),
+                    ),
+                    on_click=OperationalState.submit_customer_request("fuel"),
+                    class_name="op-card",
+                    width="100%",
+                    height="90px",
+                    border_radius="16px",
+                    cursor="pointer",
+                    align="center",
+                    justify="center",
+                ),
+                columns="2",
+                spacing="3",
+                width="100%",
+            ),
+            # Request Status Overlay
+            rx.cond(
+                OperationalState.request_status == "searching",
+                rx.vstack(
+                    rx.text("Buscando o melhor profissional...", weight="bold", color=COLORS["text"], text_align="center"),
+                    rx.spinner(size="1"),
+                    spacing="3",
+                    align="center",
+                    padding="1.2rem",
+                    width="100%",
+                    background="rgba(255,255,255,0.9)",
+                    border_radius="16px",
+                    margin_top="1rem",
+                    border=f"1px solid {COLORS['line']}",
+                ),
+            ),
+            rx.cond(
+                OperationalState.request_status == "matched",
+                rx.vstack(
+                    rx.text("✅ Profissional encontrado!", weight="bold", color=COLORS["emergency_orange"], text_align="center"),
+                    rx.text("O especialista já foi notificado e está a caminho.", font_size="0.9rem", color=COLORS["text"], text_align="center"),
+                    rx.button("Cancelar Pedido", on_click=OperationalState.set_request_status("idle"), class_name="secondary-button", size="1"),
+                    spacing="3",
+                    align="center",
+                    padding="1.2rem",
+                    width="100%",
+                    background="rgba(255,255,255,0.9)",
+                    border_radius="16px",
+                    margin_top="1rem",
+                    border=f"1px solid {COLORS['line']}",
+                ),
+            ),
+            width="100%",
+            padding="1rem",
+            background="rgba(255,255,255,0.8)",
+            backdrop_filter="blur(15px)",
+            border_radius="2rem 2rem 0 0",
+            position="absolute",
+            bottom="0",
+            left="0",
+            right="0",
+            z_index="100",
+            border="1px solid rgba(255,255,255,0.5)",
+            box_shadow="0 -10px 30px rgba(0,0,0,0.1)",
+            pointer_events="auto",
+        ),
+        rx.box(
+            width="100%",
+            height="100vh",
+            position="absolute",
+            top="0",
+            left="0",
+            z_index="10",
+            pointer_events="none",
+        ),
+        rx.input(
+            value=OperationalState.lat_lng_update_value,
+            on_change=OperationalState.handle_lat_lng_update,
+            id="lat-lng-trigger",
+            display="none",
         ),
         width="100%",
         height="100vh",
         position="relative",
         overflow="hidden",
+        # Geolocation Trigger
+        on_mount=rx.call_script(
+            "navigator.geolocation.getCurrentPosition((pos) => { "
+            "const { latitude: lat, longitude: lng } = pos.coords; "
+            "window.updateUserMarker('customer-map', lat, lng); "
+            "window.triggerReflexUpdate({ role: 'client', lat: lat, lng: lng }); "
+            "});"
+        ),
     )
 
 
@@ -837,119 +1215,137 @@ def provider_dashboard() -> rx.Component:
     return rx.box(
         # Map Container
         rx.box(
-            rx.html(
-                '<div id="provider-map" style="height: 100vh; width: 100vw; position: absolute; top: 0; left: 0; z-index: 0; background: #f3f4f6;"></div>'
-                '<script>'
-                'function initProviderMap() {'
-                '  var pMap = L.map("provider-map", { zoomControl: false }).setView([-23.5505, -46.6333], 13);'
-                '  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "" }).addTo(pMap);'
-                '  L.marker([-23.5505, -46.6333], { icon: L.divIcon({ className: "provider-marker", html: "🛠️" }) }).addTo(pMap).bindPopup("Minha Localização");'
-                '  var activeCalls = ['
-                '    {id: 101, name: "Motorista A", type: "Pneu Furado", coords: [-23.5520, -46.6340]},'
-                '    {id: 102, name: "Motorista B", type: "Bateria", coords: [-23.5580, -46.6310]}'
-                '  ];'
-                '  activeCalls.forEach(c => L.marker(c.coords).addTo(pMap).bindPopup(`Chamado #${c.id}: ${c.type}`));'
-                '}'
-                'setTimeout(initProviderMap, 100);'
-                '</script>',
-            ),
+            id="provider-map",
             width="100%",
             height="100vh",
             position="absolute",
             top="0",
             left="0",
             z_index="0",
+            on_mount=rx.call_script(
+                "window.initSOSMap('provider-map', [-23.5505, -46.6333], 13);"
+            ),
         ),
-        # Overlay UI
-        rx.box(
-            rx.vstack(
-                # Top Bar: Status Toggle
-                rx.hstack(
-                    rx.box("SOS Drive", weight="bold", font_size="1.2rem", color=COLORS["text"]),
-                    rx.hstack(
-                        rx.text(
-                            rx.cond(OperationalState.providers[0]["status"] == "online", "SOU ONLINE", "SOU OFFLINE"),
-                            font_size="0.8rem",
-                            weight="bold",
-                            color=COLORS["text"],
-                        ),
-                        rx.checkbox(
-                            on_change=OperationalState.toggle_provider_status,
-                            checked=rx.cond(OperationalState.providers[0]["status"] == "online", True, False),
-                        ),
-                        spacing="2",
-                        align="center",
-                        class_name="glass-panel",
-                        padding="0.5rem 1rem",
-                    ),
-                    justify="between",
-                    width="100%",
-                    position="absolute",
-                    top="2rem",
-                    left="2rem",
-                    right="2rem",
-                    z_index="20",
-                    pointer_events="auto",
+        # Top Navigation Bar
+        rx.hstack(
+            rx.button(
+                rx.text("🏠 Home"),
+                on_click=rx.redirect("/home"),
+                class_name="glass-panel",
+                padding="0.5rem 1rem",
+                border_radius="12px",
+                font_size="0.8rem",
+                weight="bold",
+                cursor="pointer",
+            ),
+            rx.spacer(),
+            rx.hstack(
+                profile_avatar(),
+                rx.text(
+                    rx.cond(OperationalState.providers[0]["status"] == "online", "SOU ONLINE", "SOU OFFLINE"),
+                    font_size="0.8rem",
+                    weight="bold",
+                    color=COLORS["text"],
                 ),
-                # Active Calls List (Bottom)
-                rx.vstack(
-                    rx.text("Chamados Disponíveis", weight="bold", size="5", color=COLORS["text"]),
-                    rx.vstack(
-                        rx.foreach(
-                            OperationalState.active_calls,
-                            lambda call: rx.hstack(
-                                rx.vstack(
-                                    rx.text(call["service_type"], weight="bold", color=COLORS["text"]),
-                                    rx.text(f"ID: {call['id']}", font_size="0.7rem", color=COLORS["muted"]),
-                                    align="start",
-                                    spacing="1",
-                                ),
-                                rx.button(
-                                    "Aceitar",
-                                    on_click=OperationalState.accept_call(call["id"]),
-                                    class_name="primary-button",
-                                    size="1",
-                                ),
-                                justify="between",
-                                width="100%",
-                                padding="1rem",
-                                class_name="op-card",
-                                border_radius="12px",
-                            )
+                rx.checkbox(
+                    on_change=OperationalState.toggle_provider_status,
+                    checked=rx.cond(OperationalState.providers[0]["status"] == "online", True, False),
+                ),
+                spacing="3",
+                align="center",
+                class_name="glass-panel",
+                padding="0.5rem 1rem",
+            ),
+            position="absolute",
+            top="2rem",
+            left="2rem",
+            right="2rem",
+            z_index="100",
+            pointer_events="auto",
+            align="center",
+        ),
+        # Center Map Button
+        rx.button(
+            "🎯",
+            on_click=rx.call_script("window.centerMap('provider-map')"),
+            class_name="glass-panel",
+            position="absolute",
+            bottom="15rem",
+            right="1rem",
+            z_index="100",
+            width="3rem",
+            height="3rem",
+            border_radius="50%",
+            pointer_events="auto",
+            cursor="pointer",
+            font_size="1.5rem",
+        ),
+        # Active Calls List (Bottom)
+        rx.vstack(
+            rx.text("Chamados Disponíveis", weight="bold", size="5", color=COLORS["text"]),
+            rx.vstack(
+                rx.foreach(
+                    OperationalState.active_calls,
+                    lambda call: rx.hstack(
+                        rx.vstack(
+                            rx.text(call["service_type"], weight="bold", color=COLORS["text"]),
+                            rx.text(f"ID: {call['id']}", font_size="0.7rem", color=COLORS["muted"]),
+                            align="start",
+                            spacing="1",
                         ),
+                        rx.button(
+                            "Aceitar",
+                            on_click=OperationalState.accept_call(call["id"]),
+                            class_name="primary-button",
+                            size="1",
+                        ),
+                        justify="between",
                         width="100%",
-                        spacing="2",
-                    ),
-                    rx.button(
-                        "Simular Novo Chamado",
-                        on_click=OperationalState.simulate_new_call,
-                        class_name="secondary-button",
-                        size="1",
-                        margin_top="1rem",
-                        width="100%",
-                    ),
-                    width="100%",
-                    padding="1.5rem",
-                    background="rgba(255,255,255,0.8)",
-                    backdrop_filter="blur(15px)",
-                    border_radius="2rem 2rem 0 0",
-                    position="absolute",
-                    bottom="0",
-                    left="0",
-                    right="0",
-                    z_index="20",
-                    border="1px solid rgba(255,255,255,0.5)",
-                    box_shadow="0 -10px 30px rgba(0,0,0,0.1)",
-                    pointer_events="auto",
+                        padding="1rem",
+                        class_name="op-card",
+                        border_radius="12px",
+                    )
                 ),
                 width="100%",
-                height="100vh",
-                position="absolute",
-                top="0",
-                left="0",
-                z_index="10",
-                pointer_events="none",
+                spacing="2",
             ),
+            rx.button(
+                "Simular Novo Chamado",
+                on_click=OperationalState.simulate_new_call,
+                class_name="secondary-button",
+                size="1",
+                margin_top="1rem",
+                width="100%",
+            ),
+            width="100%",
+            padding="1.5rem",
+            background="rgba(255,255,255,0.8)",
+            backdrop_filter="blur(15px)",
+            border_radius="2rem 2rem 0 0",
+            position="absolute",
+            bottom="0",
+            left="0",
+            right="0",
+            z_index="100",
+            border="1px solid rgba(255,255,255,0.5)",
+            box_shadow="0 -10px 30px rgba(0,0,0,0.1)",
+            pointer_events="auto",
+        ),
+        # Tracking Trigger
+        rx.box(
+            on_mount=rx.call_script(
+                f"window.startSOSTracking({OperationalState.current_provider_id}, (lat, lng) => {{ "
+                f"window.updateUserMarker('provider-map', lat, lng); "
+                f"window.triggerReflexUpdate({{ role: 'provider', provider_id: {OperationalState.current_provider_id}, lat: lat, lng: lng }}); "
+                f"}})"
+            ),
+            display="none",
+        ),
+        rx.input(
+            value=OperationalState.lat_lng_update_value,
+            on_change=OperationalState.handle_lat_lng_update,
+            id="lat-lng-trigger",
+            display="none",
         ),
         width="100%",
         height="100vh",
@@ -958,21 +1354,71 @@ def provider_dashboard() -> rx.Component:
     )
 
 
-def provider_profile_screen() -> rx.Component:
+def profile_screen() -> rx.Component:
+    """Unified profile screen for both clients and providers."""
     return rx.center(
         rx.vstack(
-            rx.text("meu perfil", class_name="section-kicker"),
-            rx.heading("Configurações do Prestador", class_name="section-title", size="8"),
-            rx.text("Defina suas especialidades para receber os chamados corretos.", class_name="section-intro"),
+            # Top Navigation / Back Button
+            rx.hstack(
+                rx.button(
+                    rx.hstack(rx.text("←", font_size="1.2rem"), rx.text("Voltar")),
+                    on_click=rx.redirect("/home"),
+                    class_name="secondary-button",
+                    size="1",
+                ),
+                justify="start",
+                width="100%",
+                margin_bottom="2rem",
+            ),
+            # Header Section
             rx.vstack(
+                rx.text("meu perfil", class_name="section-kicker"),
+                rx.heading("Configurações de Perfil", class_name="section-title", size="8"),
+                rx.text("Mantenha seus dados atualizados para melhor assistência.", class_name="section-intro"),
+                align="start",
+                spacing="2",
+                width="100%",
+            ),
+            # Main Content Area
+            rx.vstack(
+                # Profile Header with Avatar and Upload
+                rx.vstack(
+                    rx.box(
+                        rx.cond(
+                            AppState.user_profile_photo != "",
+                            rx.image(src=AppState.user_profile_photo, width="100%", height="100%", border_radius="50%", object_fit="cover"),
+                            rx.center(
+                                rx.text(AppState.user_initials, font_size="2rem", weight="bold", color=COLORS["text"]),
+                                width="100%",
+                                height="100%",
+                                background=COLORS["line"],
+                                border_radius="50%",
+                            ),
+                        ),
+                        width="100px",
+                        height="100px",
+                        border=f"3px solid {COLORS['emergency_orange']}",
+                        border_radius="50%",
+                        overflow="hidden",
+                    ),
+                    rx.button(
+                        "Alterar Foto",
+                        on_click=AppState.handle_profile_upload,
+                        class_name="secondary-button",
+                        size="1",
+                    ),
+                    align="center",
+                    spacing="3",
+                    margin_bottom="2rem",
+                ),
                 # Basic Info
                 rx.vstack(
-                    rx.text("Informações Básicas", weight="bold", size="4"),
+                    rx.text("Informações Básicas", weight="bold", size="4", color=COLORS["navy"]),
                     rx.vstack(
                         rx.text("Nome", class_name="field-label"),
                         rx.input(
-                            value=OperationalState.providers[0]["name"],
-                            on_change=lambda v: OperationalState.set_provider_name(v),
+                            value=AppState.user_full_name,
+                            on_change=AppState.set_user_full_name,
                             width="100%",
                             height="3.25rem",
                             padding="0 1rem",
@@ -981,43 +1427,124 @@ def provider_profile_screen() -> rx.Component:
                         ),
                         width="100%",
                         spacing="2",
+                        align="start",
                     ),
-                    spacing="3",
-                    class_name="op-card",
-                    width="100%",
-                ),
-                # Specialties
-                rx.vstack(
-                    rx.text("Minhas Especialidades", weight="bold", size="4"),
-                    rx.grid(
-                        rx.foreach(
-                            [("tire", "Troca de Pneu"), ("battery", "Carga de Bateria"), ("mechanical", "Mecânica Geral"), ("fuel", "Combustível")],
-                            lambda spec: rx.checkbox(
-                                rx.text(spec[1]),
-                                checked=OperationalState.current_provider_specialties.contains(spec[0]),
-                                on_change=lambda _: OperationalState.toggle_specialty(spec[0]),
-                                padding="0.5rem",
-                            ),
+                    rx.vstack(
+                        rx.text("Email", class_name="field-label"),
+                        rx.input(
+                            value=AppState.user_email,
+                            on_change=AppState.set_user_email,
+                            width="100%",
+                            height="3.25rem",
+                            padding="0 1rem",
+                            border_radius="14px",
+                            border=f"1px solid {COLORS['line']}",
                         ),
-                        columns="2",
-                        spacing="3",
                         width="100%",
+                        spacing="2",
+                        align="start",
+                    ),
+                    rx.vstack(
+                        rx.text("Telefone", class_name="field-label"),
+                        rx.input(
+                            value=AppState.user_phone,
+                            on_change=AppState.set_user_phone,
+                            width="100%",
+                            height="3.25rem",
+                            padding="0 1rem",
+                            border_radius="14px",
+                            border=f"1px solid {COLORS['line']}",
+                        ),
+                        width="100%",
+                        spacing="2",
+                        align="start",
                     ),
                     spacing="3",
                     class_name="op-card",
                     width="100%",
+                    align="start",
+                ),
+                # Role Specific: Provider Specialties
+                rx.cond(
+                    AppState.user_role == "provider",
+                    rx.vstack(
+                        rx.text("Minhas Especialidades", weight="bold", size="4", color=COLORS["navy"]),
+                        rx.grid(
+                            rx.foreach(
+                                [("tire", "Troca de Pneu"), ("battery", "Carga de Bateria"), ("mechanical", "Mecânica Geral"), ("fuel", "Combustível")],
+                                lambda spec: rx.checkbox(
+                                    rx.text(spec[1]),
+                                    checked=OperationalState.current_provider_specialties.contains(spec[0]),
+                                    on_change=lambda _: OperationalState.toggle_specialty(spec[0]),
+                                    padding="0.5rem",
+                                ),
+                            ),
+                            columns="2",
+                            spacing="3",
+                            width="100%",
+                        ),
+                        spacing="3",
+                        class_name="op-card",
+                        width="100%",
+                        align="start",
+                    ),
+                ),
+                # Vehicles Section
+                rx.vstack(
+                    rx.hstack(
+                        rx.vstack(
+                            rx.text("Meus Veículos", weight="bold", size="4", color=COLORS["navy"]),
+                            rx.text("Seus veículos cadastrados", font_size="0.8rem", color=COLORS["text"]),
+                            align="start",
+                            spacing="0",
+                        ),
+                        rx.spacer(),
+                        rx.button(
+                            "Adicionar",
+                            on_click=lambda: OperationalState.open_vehicle_modal(),
+                            class_name="secondary-button",
+                            size="1",
+                        ),
+                        width="100%",
+                        align="center",
+                        justify="center",
+                        margin_bottom="1rem",
+                    ),
+                    rx.vstack(
+                        rx.foreach(
+                            OperationalState.user_vehicles,
+                            lambda v: vehicle_card(v),
+                        ),
+                        width="100%",
+                        spacing="3",
+                        align="start",
+                    ),
+                    spacing="3",
+                    class_name="op-card",
+                    width="100%",
+                    align="start",
                 ),
                 rx.button("Salvar Perfil", class_name="primary-button", width="100%"),
-                width="min(100%, 32rem)",
+                width="100%",
+                max_width="600px",
                 spacing="5",
                 align="start",
             ),
-            align="center",
+            align="start",
             spacing="6",
             padding="2rem 1rem",
+            width="100%",
+            max_width="600px",
         ),
-        min_height="calc(100vh - 8rem)",
+        rx.cond(
+            OperationalState.show_vehicle_modal,
+            vehicle_modal(),
+        ),
+        background="white",
+        width="100%",
+        min_height="100vh",
     )
+
 
 
 def map_test_screen() -> rx.Component:
@@ -1045,32 +1572,24 @@ def map_test_screen() -> rx.Component:
     )
 
 
-def index() -> rx.Component:
-    return rx.cond(
-        AppState.screen == "map_test",
-        rx.box(map_test_screen(), class_name="app-shell"),
-        rx.cond(
-            AppState.screen == "provider_dash",
-            rx.box(provider_dashboard(), class_name="app-shell"),
-            rx.cond(
-                AppState.screen == "provider_profile",
-                rx.box(provider_profile_screen(), class_name="app-shell"),
-                rx.cond(
-                    AppState.screen == "signup",
-                    rx.box(signup_screen(), class_name="app-shell"),
-                    rx.cond(
-                        AppState.screen == "login",
-                        rx.box(login_screen(), class_name="app-shell"),
-                        rx.cond(
-                            AppState.screen == "authenticated",
-                            rx.box(customer_dashboard(), class_name="app-shell"),
-                            rx.box(landing_page(), class_name="app-shell"),
-                        ),
-                    ),
-                ),
-            ),
+def home_screen() -> rx.Component:
+    """Dynamic home screen that redirects based on user role."""
+    return rx.center(
+        rx.vstack(
+            rx.spinner(size="3"),
+            rx.text("Carregando seu painel...", weight="bold"),
+            align="center",
+            spacing="4",
+        ),
+        on_mount=rx.cond(
+            AppState.user_role == "provider",
+            rx.redirect("/provider"),
+            rx.redirect("/customer"),
         ),
     )
+
+def index() -> rx.Component:
+    return rx.box(landing_page(), class_name="app-shell")
 
 
 app = rx.App(
@@ -1078,6 +1597,97 @@ app = rx.App(
     head_components=[
         rx.html('<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />'),
         rx.html('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'),
+        rx.html('''
+        <script>
+        window.sosMaps = {};
+        window.sosMarkers = {};
+        window.sosUserMarkers = {};
+
+        window.initSOSMap = function(id, center, zoom) {
+            const map = L.map(id, { zoomControl: false }).setView(center, zoom);
+            L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "" }).addTo(map);
+            window.sosMaps[id] = map;
+            setTimeout(() => map.invalidateSize(), 200);
+            return map;
+        };
+
+        window.updateUserMarker = function(mapId, lat, lng) {
+            const map = window.sosMaps[mapId];
+            if (!map) return;
+
+            if (window.sosUserMarkers[mapId]) {
+                window.sosUserMarkers[mapId].setLatLng([lat, lng]);
+            } else {
+                window.sosUserMarkers[mapId] = L.marker([lat, lng], {
+                    icon: L.divIcon({
+                        className: "user-marker",
+                        html: "🔵",
+                        iconSize: [20, 20]
+                    })
+                }).addTo(map).bindPopup("Você está aqui").openPopup();
+            }
+            map.setView([lat, lng], 13);
+        };
+
+        window.updateSOSMarkers = function(mapId, providers, isClient = false) {
+            const map = window.sosMaps[mapId];
+            if (!map) return;
+
+            if (window.sosMarkers[mapId]) {
+                window.sosMarkers[mapId].forEach(m => map.removeLayer(m));
+            }
+            window.sosMarkers[mapId] = [];
+
+            providers.forEach(p => {
+                const marker = L.marker([p.lat, p.lng], {
+                    icon: L.divIcon({
+                        className: isClient ? "user-marker" : "provider-marker",
+                        html: isClient ? "🔵" : "🛠️"
+                    })
+                }).addTo(map).bindPopup(p.name);
+                window.sosMarkers[mapId].push(marker);
+            });
+        };
+
+        window.setSOSCenter = function(mapId, lat, lng) {
+            const map = window.sosMaps[mapId];
+            if (map) map.setView([lat, lng], 13);
+        };
+
+        window.centerMap = function(mapId) {
+            const map = window.sosMaps[mapId];
+            const userMarker = window.sosUserMarkers[mapId];
+            if (map && userMarker) {
+                map.setView(userMarker.getLatLng(), 13);
+            }
+        };
+
+        window.triggerReflexUpdate = function(data) {
+            const input = document.getElementById('lat-lng-trigger');
+            if (!input) return;
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+            nativeInputValueSetter.call(input, JSON.stringify(data));
+            const event = new Event('input', { bubbles: true });
+            input.dispatchEvent(event);
+        };
+
+        window.startSOSTracking = function(providerId, onLocationUpdate) {
+            if (!navigator.geolocation) return;
+            navigator.geolocation.watchPosition(
+                (pos) => onLocationUpdate(pos.coords.latitude, pos.coords.longitude),
+                (err) => console.error("Geolocation error:", err),
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+            );
+        };
+        </script>
+        '''),
     ],
 )
-app.add_page(index, title="SOS Drive | Assistência quando importa")
+app.add_page(index, route="/", title="SOS Drive | Assistência quando importa")
+app.add_page(home_screen, route="/home", title="Home | SOS Drive")
+app.add_page(signup_screen, route="/signup", title="Cadastro | SOS Drive")
+app.add_page(login_screen, route="/login", title="Login | SOS Drive")
+app.add_page(customer_dashboard, route="/customer", title="Dashboard Cliente | SOS Drive")
+app.add_page(provider_dashboard, route="/provider", title="Dashboard Prestador | SOS Drive")
+app.add_page(profile_screen, route="/profile", title="Meu Perfil | SOS Drive")
+app.add_page(map_test_screen, route="/test-map", title="Teste de Mapa | SOS Drive")
