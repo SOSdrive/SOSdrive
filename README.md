@@ -26,6 +26,12 @@ SOSdrive/
 
 Abra `http://localhost:3000` no navegador.
 
+Para habilitar login e cadastro, configure a URL base da API Xano no ambiente:
+
+```powershell
+$env:XANO_API_URL = "https://seu-workspace.xano.io/api:seu-grupo"
+```
+
 ## Regra de arquitetura
 
 Tudo do frontend é escrito em Python usando Reflex. Esta versão do projeto

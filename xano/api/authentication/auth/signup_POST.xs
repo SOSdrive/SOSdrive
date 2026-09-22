@@ -6,6 +6,9 @@ query "auth/signup" verb=POST {
     text name?
     email email? filters=trim|lower
     text password?
+    enum role? {
+      values = ["client", "provider"]
+    }
   }
 
   stack {
@@ -28,7 +31,7 @@ query "auth/signup" verb=POST {
         name      : $input.name
         email     : $input.email
         password  : $input.password
-        role      : "member"
+        role      : $input.role
       }
     } as $user
   
@@ -46,7 +49,10 @@ query "auth/signup" verb=POST {
     } as $event_log
   }
 
-  response = {authToken: $authToken, user_id: $user.id}
+  response = {
+    authToken: $authToken
+    user_id: $user.id
+  }
   tags = ["xano:quick-start"]
   guid = "va8mvDiApbOya_joZiHthlfBeHM"
 }

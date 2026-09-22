@@ -9,8 +9,14 @@ import os
 import math
 import time
 import asyncio
+import json
+import logging
+from collections.abc import Callable
 
 from styles import GLOBAL_STYLE, COLORS
+
+
+logger = logging.getLogger(__name__)
 
 
 def validate_signup(name: str, email: str, password: str) -> str:
@@ -20,26 +26,128 @@ def validate_signup(name: str, email: str, password: str) -> str:
     return ""
 
 
-def login_with_xano(email: str, password: str, api_url: str) -> tuple[str, int]:
-    """Authenticate a driver through Xano and return its token and user id."""
+class InvalidCredentialsError(Exception):
+    """Raised when Xano rejects authentication credentials."""
+
+
+class SignupConflictError(Exception):
+    """Raised when Xano rejects a signup because the email already exists."""
+
+
+class XanoAPIError(Exception):
+    """Raised when Xano returns a structured API error."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
+def _response_message(response: requests.Response) -> str:
+    """Extract the useful Xano error message without exposing secrets."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text.strip() or f"HTTP {response.status_code}"
+    if isinstance(body, dict):
+        return str(body.get("message") or body.get("error") or body.get("code") or body)
+    return str(body)
+
+
+def _is_duplicate_email_error(status_code: int, message: str) -> bool:
+    normalized_message = message.lower()
+    duplicate_markers = (
+        "already exists",
+        "already in use",
+        "already registered",
+        "duplicate",
+        "unique",
+        "email exists",
+        "e-mail já está em uso",
+    )
+    return status_code == 409 or any(marker in normalized_message for marker in duplicate_markers)
+
+
+def _safe_log_payload(payload: dict) -> dict:
+    return {
+        key: "<redacted>" if key in {"password", "authToken", "token"} else value
+        for key, value in payload.items()
+    }
+
+
+def authenticate_with_xano(path: str, payload: dict, api_url: str) -> tuple[str, int]:
+    """Call an Xano auth endpoint and return its token and user ID."""
     normalized_url = api_url.strip().rstrip("/")
     if not normalized_url:
         raise RuntimeError("XANO_API_URL is not configured")
 
-    response = requests.post(
-        f"{normalized_url}/auth/login",
-        json={"email": email.strip().lower(), "password": password},
-        timeout=10,
+    endpoint = f"{normalized_url}{path}"
+    logger.warning("Xano request: POST %s payload=%s", endpoint, _safe_log_payload(payload))
+    response = requests.post(endpoint, json=payload, timeout=10)
+    message = _response_message(response) if response.status_code >= 400 else ""
+    try:
+        response_body = response.json()
+    except ValueError:
+        response_body = response.text.strip()
+    safe_response_body = (
+        _safe_log_payload(response_body)
+        if isinstance(response_body, dict)
+        else response_body
     )
-    if response.status_code in {401, 403}:
-        raise PermissionError("Invalid credentials")
-    response.raise_for_status()
-    payload = response.json()
-    auth_token = payload.get("authToken")
-    user_id = payload.get("user_id")
+    logger.warning(
+        "Xano response: POST %s status=%s body=%s",
+        endpoint,
+        response.status_code,
+        safe_response_body,
+    )
+
+    if response.status_code >= 400:
+        if path == "/auth/signup" and _is_duplicate_email_error(response.status_code, message):
+            raise SignupConflictError()
+        if path == "/auth/login" and response.status_code in {401, 403}:
+            raise InvalidCredentialsError()
+        raise XanoAPIError(response.status_code, message)
+
+    try:
+        response_payload = response.json()
+    except ValueError as error:
+        raise XanoAPIError(response.status_code, "Xano returned invalid JSON") from error
+    if not isinstance(response_payload, dict):
+        raise XanoAPIError(response.status_code, "Xano returned an invalid authentication response")
+    auth_token = response_payload.get("authToken")
+    user_id = response_payload.get("user_id")
     if not auth_token or not isinstance(user_id, int):
-        raise ValueError("Unexpected login response")
+        raise XanoAPIError(response.status_code, "Xano returned an invalid authentication response")
     return auth_token, user_id
+
+
+def login_with_xano(email: str, password: str, api_url: str) -> tuple[str, dict]:
+    """Authenticate a driver through Xano."""
+    return authenticate_with_xano(
+        "/auth/login",
+        {"email": email.strip().lower(), "password": password},
+        api_url,
+    )
+
+
+def signup_with_xano(
+    name: str,
+    email: str,
+    password: str,
+    role: str,
+    api_url: str,
+) -> tuple[str, int]:
+    """Create an account through Xano."""
+    return authenticate_with_xano(
+        "/auth/signup",
+        {
+            "name": name.strip(),
+            "email": email.strip().lower(),
+            "password": password,
+            "role": role,
+        },
+        api_url,
+    )
 
 
 def build_atendimento_mock(request: dict, provider_coords: list[float]) -> dict:
@@ -61,19 +169,21 @@ def build_atendimento_mock(request: dict, provider_coords: list[float]) -> dict:
     }
 
 
-class AppState(rx.State):
+class AuthState(rx.State):
     """Application state for navigation and driver authentication."""
 
     screen: str = "presentation"
-    user_role: str = "client" # Added to track role
+    user_role: str = "client"
     email: str = ""
     password: str = ""
     signup_name: str = ""
     signup_email: str = ""
     signup_password: str = ""
     signup_role: str = "client"
-    auth_token: str = ""
-    user_id: int | None = None
+    auth_token: str = rx.LocalStorage(name="sos_auth_token", sync=True)
+    user_json: str = rx.LocalStorage(name="sos_auth_user", sync=True)
+    user: dict = {}
+    user_id: int | None = rx.LocalStorage(name="sos_auth_user_id", sync=True)
     error_message: str = ""
     signup_message: str = ""
     is_loading: bool = False
@@ -85,6 +195,10 @@ class AppState(rx.State):
     user_full_name: str = "Usuário SOS"
     user_email: str = "usuario@exemplo.com"
     user_phone: str = "(11) 99999-9999"
+
+    @rx.var
+    def is_authenticated(self) -> bool:
+        return bool(self.auth_token)
 
     @rx.var
     def user_initials(self) -> str:
@@ -115,15 +229,49 @@ class AppState(rx.State):
     def set_signup_password(self, value: str) -> None:
         self.signup_password = value
 
-    def submit_signup(self) -> None:
+    def signup(self) -> None:
         self.signup_message = ""
         self.error_message = ""
-        self.error_message = validate_signup(self.signup_name, self.signup_email, self.signup_password)
+        self.error_message = validate_signup(
+            self.signup_name,
+            self.signup_email,
+            self.signup_password,
+        )
         if self.error_message:
             self.signup_password = ""
             return
-        self.signup_message = "Cadastro preparado. A conexão com o banco será adicionada na próxima etapa."
-        self.signup_password = ""
+        self.is_loading = True
+        api_url = self.get_xano_api_url()
+        if not api_url:
+            self.error_message = "Não foi possível criar sua conta. Tente novamente."
+            self.signup_password = ""
+            self.is_loading = False
+            return
+
+        try:
+            auth_token, user_id = signup_with_xano(
+                self.signup_name,
+                self.signup_email,
+                self.signup_password,
+                self.signup_role,
+                api_url,
+            )
+            self.auth_token = auth_token
+            self.user_id = user_id
+            self.load_current_user()
+            self.signup_name = ""
+            self.signup_email = ""
+            return self.redirect_to_user_home()
+        except SignupConflictError:
+            self.error_message = "Este e-mail já está em uso."
+        except XanoAPIError as error:
+            self.error_message = error.message
+        except (requests.RequestException, RuntimeError, ValueError) as error:
+            logger.exception("Xano signup request failed: %s", error)
+            self.error_message = "Não foi possível conectar ao Xano. Tente novamente."
+        finally:
+            self.signup_password = ""
+            self.is_loading = False
 
     def set_email_value(self, value: str) -> None:
         self.email = value
@@ -138,8 +286,7 @@ class AppState(rx.State):
         return rx.redirect("/test-map")
 
     def logout(self) -> None:
-        self.auth_token = ""
-        self.user_id = None
+        self.clear_session()
         self.email = ""
         self.password = ""
         self.signup_name = ""
@@ -147,10 +294,77 @@ class AppState(rx.State):
         self.signup_password = ""
         self.error_message = ""
         self.signup_message = ""
-        return rx.redirect("/")
+        return rx.redirect("/login")
 
     def get_xano_api_url(self) -> str:
         return os.getenv("XANO_API_URL", "").strip().rstrip("/")
+
+    def set_authenticated_user(self, auth_token: str, user: dict) -> None:
+        self.auth_token = auth_token
+        self.user = user
+        self.user_json = json.dumps(user)
+        self.user_id = user.get("id")
+        self.user_role = user.get("role") or "client"
+        self.user_full_name = user.get("name", self.user_full_name)
+        self.user_email = user.get("email", self.user_email)
+
+    def clear_session(self) -> None:
+        self.auth_token = ""
+        self.user_json = ""
+        self.user = {}
+        self.user_id = None
+        self.user_role = "client"
+
+    def load_current_user(self) -> None:
+        """Load the authenticated user using the stored token and user ID."""
+        if not self.auth_token or self.user_id is None:
+            raise RuntimeError("Authentication session is incomplete")
+        endpoint = f"{self.get_xano_api_url()}/auth/me"
+        logger.warning(
+            "Xano request: GET %s user_id=%s auth_token=<redacted>",
+            endpoint,
+            self.user_id,
+        )
+        response = requests.get(
+            endpoint,
+            headers={"Authorization": f"Bearer {self.auth_token}"},
+            timeout=10,
+        )
+        logger.warning(
+            "Xano response: GET %s status=%s body=%s",
+            endpoint,
+            response.status_code,
+            _safe_log_payload(response.json()) if response.content else "",
+        )
+        response.raise_for_status()
+        user = response.json()
+        if not isinstance(user, dict):
+            raise ValueError("Unexpected current user response")
+        response_user_id = user.get("id") or user.get("user_id")
+        if response_user_id is not None and int(response_user_id) != self.user_id:
+            raise ValueError("Current user does not match authenticated user")
+        self.set_authenticated_user(self.auth_token, user)
+
+    def redirect_to_user_home(self):
+        if self.user_role == "provider":
+            return rx.redirect("/home_provider")
+        return rx.redirect("/home_client")
+
+    def restore_session(self):
+        """Restore the persisted user and validate the token with Xano."""
+        if not self.auth_token:
+            self.clear_session()
+            return rx.redirect("/login")
+
+        try:
+            if self.user_json:
+                self.user = json.loads(self.user_json)
+                self.user_id = self.user.get("id")
+                self.user_role = self.user.get("role") or "client"
+            self.load_current_user()
+        except (requests.RequestException, ValueError, json.JSONDecodeError):
+            self.clear_session()
+            return rx.redirect("/login")
 
     def login(self) -> None:
         """Authenticate through Xano without retaining the submitted password."""
@@ -167,24 +381,18 @@ class AppState(rx.State):
             auth_token, user_id = login_with_xano(self.email, self.password, api_url)
             self.auth_token = auth_token
             self.user_id = user_id
-            return rx.redirect("/home")
-        except PermissionError:
-            self.error_message = "Email ou senha inválidos."
-        except (requests.RequestException, ValueError):
-            self.error_message = "Não foi possível conectar ao serviço de login. Tente novamente."
+            self.load_current_user()
+            return self.redirect_to_user_home()
+        except InvalidCredentialsError:
+            self.error_message = "E-mail ou senha inválidos."
+        except XanoAPIError as error:
+            self.error_message = error.message
+        except (requests.RequestException, RuntimeError, ValueError) as error:
+            logger.exception("Xano login request failed: %s", error)
+            self.error_message = "Não foi possível conectar ao Xano. Tente novamente."
         finally:
             self.password = ""
             self.is_loading = False
-
-    def bypass_login_client(self) -> None:
-        """Bypass login for testing as a client."""
-        self.user_role = "client"
-        return rx.redirect("/home")
-
-    def bypass_login_provider(self) -> None:
-        """Bypass login for testing as a provider."""
-        self.user_role = "provider"
-        return rx.redirect("/home")
 
     def set_user_full_name(self, value: str) -> None:
         self.user_full_name = value
@@ -200,6 +408,9 @@ class AppState(rx.State):
         # In a real app, we'd handle the upload via rx.upload
         # For mock, we just use a sample image.
         self.user_profile_photo = "https://i.pravatar.cc/300"
+
+
+AppState = AuthState
 
 
 
@@ -896,7 +1107,12 @@ def signup_screen() -> rx.Component:
                         width="100%",
                         spacing="2",
                     ),
-                    rx.button("Criar conta", type="submit", class_name="primary-button", width="100%"),
+                    rx.button(
+                        rx.cond(AuthState.is_loading, "Criando conta...", "Criar conta"),
+                        type="submit",
+                        class_name="primary-button",
+                        width="100%",
+                    ),
                     rx.cond(
                         AppState.error_message != "",
                         rx.text(AppState.error_message, class_name="error-message"),
@@ -908,7 +1124,7 @@ def signup_screen() -> rx.Component:
                     width="100%",
                     spacing="5",
                 ),
-                on_submit=AppState.submit_signup,
+                on_submit=AuthState.signup,
                 width="100%",
             ),
             rx.button(
@@ -982,28 +1198,6 @@ def login_screen() -> rx.Component:
                 "Criar uma conta",
                 on_click=AppState.open_signup,
                 class_name="text-button",
-            ),
-            rx.vstack(
-                rx.text("Acesso Rápido (Teste)", weight="bold", font_size="0.8rem", color=COLORS["muted"], margin_top="2rem"),
-                rx.hstack(
-                    rx.button(
-                        "Testar Cliente",
-                        on_click=AppState.bypass_login_client,
-                        class_name="secondary-button",
-                        size="1",
-                    ),
-                    rx.button(
-                        "Testar Prestador",
-                        on_click=AppState.bypass_login_provider,
-                        class_name="secondary-button",
-                        size="1",
-                    ),
-                    width="100%",
-                    spacing="3",
-                ),
-                align="center",
-                spacing="3",
-                width="100%",
             ),
             width="min(100%, 38rem)",
             align="start",
@@ -1789,6 +1983,7 @@ def user_home_screen() -> rx.Component:
                 rx.vstack(
                     rx.text("Olá,", font_size="1rem", color=COLORS["muted"]),
                     rx.text(AppState.user_full_name, weight="bold", font_size="1.4rem", color=COLORS["navy"]),
+                    rx.text("Cliente / Motorista", color=COLORS["muted"], font_size=".85rem"),
                     align="start",
                     spacing="0",
                 ),
@@ -1920,6 +2115,7 @@ def provider_home_screen() -> rx.Component:
         # Header
         rx.hstack(
             rx.hstack(
+                rx.text("Prestador", weight="bold", color=COLORS["navy"]),
                 rx.text("Status:", weight="bold"),
                 rx.checkbox(
                     checked=OperationalState.is_available,
@@ -2470,6 +2666,16 @@ def service_finalized_screen() -> rx.Component:
     )
 
 
+def protected_page(page: Callable[[], rx.Component]) -> rx.Component:
+    """Restore and validate the session before rendering a protected page."""
+    return rx.box(
+        page(),
+        on_mount=AuthState.restore_session,
+        width="100%",
+        min_height="100vh",
+    )
+
+
 app = rx.App(
     style=GLOBAL_STYLE,
     head_components=[
@@ -2590,15 +2796,15 @@ app = rx.App(
     ],
 )
 app.add_page(index, route="/", title="SOS Drive | Assistência quando importa")
-app.add_page(home_screen, route="/home", title="Home | SOS Drive")
-app.add_page(user_home_screen, route="/home_client", title="Home Cliente | SOS Drive")
 app.add_page(signup_screen, route="/signup", title="Cadastro | SOS Drive")
 app.add_page(login_screen, route="/login", title="Login | SOS Drive")
-app.add_page(customer_dashboard, route="/customer", title="Dashboard Cliente | SOS Drive")
-app.add_page(provider_dashboard, route="/provider", title="Dashboard Prestador | SOS Drive")
-app.add_page(provider_home_screen, route="/home_provider", title="Solicitações Próximas | SOS Drive")
-app.add_page(service_details_screen, route="/service-details", title="Detalhes do Atendimento | SOS Drive")
-app.add_page(provider_service_progress_screen, route="/provider-service-progress", title="Atendimento em Andamento | SOS Drive")
-app.add_page(service_finalized_screen, route="/service-finalized", title="Chamado Finalizado | SOS Drive")
-app.add_page(profile_screen, route="/profile", title="Meu Perfil | SOS Drive")
-app.add_page(map_test_screen, route="/test-map", title="Teste de Mapa | SOS Drive")
+app.add_page(lambda: protected_page(home_screen), route="/home", title="Home | SOS Drive")
+app.add_page(lambda: protected_page(user_home_screen), route="/home_client", title="Home Cliente | SOS Drive")
+app.add_page(lambda: protected_page(customer_dashboard), route="/customer", title="Dashboard Cliente | SOS Drive")
+app.add_page(lambda: protected_page(provider_dashboard), route="/provider", title="Dashboard Prestador | SOS Drive")
+app.add_page(lambda: protected_page(provider_home_screen), route="/home_provider", title="Solicitações Próximas | SOS Drive")
+app.add_page(lambda: protected_page(service_details_screen), route="/service-details", title="Detalhes do Atendimento | SOS Drive")
+app.add_page(lambda: protected_page(provider_service_progress_screen), route="/provider-service-progress", title="Atendimento em Andamento | SOS Drive")
+app.add_page(lambda: protected_page(service_finalized_screen), route="/service-finalized", title="Chamado Finalizado | SOS Drive")
+app.add_page(lambda: protected_page(profile_screen), route="/profile", title="Meu Perfil | SOS Drive")
+app.add_page(lambda: protected_page(map_test_screen), route="/test-map", title="Teste de Mapa | SOS Drive")

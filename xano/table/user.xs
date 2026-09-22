@@ -9,9 +9,9 @@ table user {
     email? email filters=trim|lower
     password? password filters=min:8|minAlpha:1|minDigit:1
   
-    // The role of the user within their company (e.g., 'admin', 'member').
+    // The type of account used to select the correct application home.
     enum role? {
-      values = ["admin", "member"]
+      values = ["client", "provider"]
     }
   
     object password_reset? {
