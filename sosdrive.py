@@ -26,6 +26,32 @@ def validate_signup(name: str, email: str, password: str) -> str:
     return ""
 
 
+def digits_only(value: str) -> str:
+    return "".join(character for character in value if character.isdigit())
+
+
+def format_cpf(value: str) -> str:
+    digits = digits_only(value)[:11]
+    if len(digits) <= 3:
+        return digits
+    if len(digits) <= 6:
+        return f"{digits[:3]}.{digits[3:]}"
+    if len(digits) <= 9:
+        return f"{digits[:3]}.{digits[3:6]}.{digits[6:]}"
+    return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
+
+
+def format_phone(value: str) -> str:
+    digits = digits_only(value)[:11]
+    if len(digits) <= 2:
+        return digits
+    if len(digits) <= 7:
+        return f"({digits[:2]}) {digits[2:]}"
+    if len(digits) == 11:
+        return f"({digits[:2]}) {digits[2:7]}-{digits[7:]}"
+    return f"({digits[:2]}) {digits[2:6]}-{digits[6:]}"
+
+
 class InvalidCredentialsError(Exception):
     """Raised when Xano rejects authentication credentials."""
 
@@ -41,6 +67,20 @@ class XanoAPIError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+class UnsupportedRoleError(Exception):
+    """Raised when an authenticated user has an unsupported role."""
+
+
+def normalize_user_role(role: str | None) -> str:
+    """Normalize legacy role values and reject unknown account types."""
+    normalized_role = (role or "").strip().lower()
+    role_aliases = {"client": "cliente", "provider": "prestador"}
+    normalized_role = role_aliases.get(normalized_role, normalized_role)
+    if normalized_role not in {"cliente", "prestador"}:
+        raise UnsupportedRoleError()
+    return normalized_role
 
 
 def _response_message(response: requests.Response) -> str:
@@ -121,7 +161,7 @@ def authenticate_with_xano(path: str, payload: dict, api_url: str) -> tuple[str,
     return auth_token, user_id
 
 
-def login_with_xano(email: str, password: str, api_url: str) -> tuple[str, dict]:
+def login_with_xano(email: str, password: str, api_url: str) -> tuple[str, int]:
     """Authenticate a driver through Xano."""
     return authenticate_with_xano(
         "/auth/login",
@@ -150,6 +190,41 @@ def signup_with_xano(
     )
 
 
+def fetch_user_profile(auth_token: str, api_url: str) -> dict:
+    """Fetch the profile associated with the current Xano token."""
+    response = requests.get(
+        f"{api_url.rstrip('/')}/user_profile",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        timeout=10,
+    )
+    if response.status_code == 404:
+        return {}
+    response.raise_for_status()
+    payload = response.json()
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected profile response")
+    return payload
+
+
+def save_user_profile(auth_token: str, api_url: str, payload: dict, method: str) -> dict:
+    """Create or update the profile owned by the current Xano token."""
+    response = requests.request(
+        method,
+        f"{api_url.rstrip('/')}/user_profile",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        json=payload,
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise XanoAPIError(response.status_code, _response_message(response))
+    result = response.json()
+    if not isinstance(result, dict):
+        raise ValueError("Unexpected profile response")
+    return result
+
+
 def build_atendimento_mock(request: dict, provider_coords: list[float]) -> dict:
     """Build a local/mock attendance payload from one accepted request."""
     return {
@@ -173,17 +248,17 @@ class AuthState(rx.State):
     """Application state for navigation and driver authentication."""
 
     screen: str = "presentation"
-    user_role: str = "client"
+    user_role: str = "cliente"
     email: str = ""
     password: str = ""
     signup_name: str = ""
     signup_email: str = ""
     signup_password: str = ""
-    signup_role: str = "client"
+    signup_role: str = "cliente"
     auth_token: str = rx.LocalStorage(name="sos_auth_token", sync=True)
     user_json: str = rx.LocalStorage(name="sos_auth_user", sync=True)
     user: dict = {}
-    user_id: int | None = rx.LocalStorage(name="sos_auth_user_id", sync=True)
+    user_id: str = rx.LocalStorage(name="sos_auth_user_id", sync=True)
     error_message: str = ""
     signup_message: str = ""
     is_loading: bool = False
@@ -195,6 +270,11 @@ class AuthState(rx.State):
     user_full_name: str = "Usuário SOS"
     user_email: str = "usuario@exemplo.com"
     user_phone: str = "(11) 99999-9999"
+    user_cpf: str = ""
+    profile_exists: bool = False
+    profile_error: str = ""
+    profile_message: str = ""
+    profile_is_loading: bool = False
 
     @rx.var
     def is_authenticated(self) -> bool:
@@ -217,7 +297,7 @@ class AuthState(rx.State):
         return rx.redirect("/login")
 
     def choose_signup_role(self, role: str) -> None:
-        if role in {"client", "provider"}:
+        if role in {"cliente", "prestador"}:
             self.signup_role = role
 
     def set_signup_name(self, value: str) -> None:
@@ -257,7 +337,7 @@ class AuthState(rx.State):
                 api_url,
             )
             self.auth_token = auth_token
-            self.user_id = user_id
+            self.user_id = str(user_id)
             self.load_current_user()
             self.signup_name = ""
             self.signup_email = ""
@@ -303,8 +383,8 @@ class AuthState(rx.State):
         self.auth_token = auth_token
         self.user = user
         self.user_json = json.dumps(user)
-        self.user_id = user.get("id")
-        self.user_role = user.get("role") or "client"
+        self.user_id = str(user.get("id", ""))
+        self.user_role = normalize_user_role(user.get("role"))
         self.user_full_name = user.get("name", self.user_full_name)
         self.user_email = user.get("email", self.user_email)
 
@@ -312,18 +392,19 @@ class AuthState(rx.State):
         self.auth_token = ""
         self.user_json = ""
         self.user = {}
-        self.user_id = None
-        self.user_role = "client"
+        self.user_id = ""
+        self.user_role = "cliente"
 
     def load_current_user(self) -> None:
         """Load the authenticated user using the stored token and user ID."""
-        if not self.auth_token or self.user_id is None:
+        if not self.auth_token or not self.user_id:
             raise RuntimeError("Authentication session is incomplete")
+        current_user_id = int(self.user_id)
         endpoint = f"{self.get_xano_api_url()}/auth/me"
         logger.warning(
             "Xano request: GET %s user_id=%s auth_token=<redacted>",
             endpoint,
-            self.user_id,
+            current_user_id,
         )
         response = requests.get(
             endpoint,
@@ -341,14 +422,14 @@ class AuthState(rx.State):
         if not isinstance(user, dict):
             raise ValueError("Unexpected current user response")
         response_user_id = user.get("id") or user.get("user_id")
-        if response_user_id is not None and int(response_user_id) != self.user_id:
+        if response_user_id is not None and int(response_user_id) != current_user_id:
             raise ValueError("Current user does not match authenticated user")
         self.set_authenticated_user(self.auth_token, user)
 
     def redirect_to_user_home(self):
-        if self.user_role == "provider":
-            return rx.redirect("/home_provider")
-        return rx.redirect("/home_client")
+        if self.user_role == "prestador":
+            return rx.redirect("/perfil-prestador")
+        return rx.redirect("/perfil-cliente")
 
     def restore_session(self):
         """Restore the persisted user and validate the token with Xano."""
@@ -359,10 +440,10 @@ class AuthState(rx.State):
         try:
             if self.user_json:
                 self.user = json.loads(self.user_json)
-                self.user_id = self.user.get("id")
-                self.user_role = self.user.get("role") or "client"
+                self.user_id = str(self.user.get("id", ""))
+                self.user_role = normalize_user_role(self.user.get("role"))
             self.load_current_user()
-        except (requests.RequestException, ValueError, json.JSONDecodeError):
+        except (requests.RequestException, ValueError, json.JSONDecodeError, UnsupportedRoleError):
             self.clear_session()
             return rx.redirect("/login")
 
@@ -380,9 +461,11 @@ class AuthState(rx.State):
         try:
             auth_token, user_id = login_with_xano(self.email, self.password, api_url)
             self.auth_token = auth_token
-            self.user_id = user_id
+            self.user_id = str(user_id)
             self.load_current_user()
             return self.redirect_to_user_home()
+        except UnsupportedRoleError:
+            self.error_message = "Sua conta não possui um tipo de usuário válido."
         except InvalidCredentialsError:
             self.error_message = "E-mail ou senha inválidos."
         except XanoAPIError as error:
@@ -401,7 +484,85 @@ class AuthState(rx.State):
         self.user_email = value
 
     def set_user_phone(self, value: str) -> None:
-        self.user_phone = value
+        self.user_phone = format_phone(value)
+
+    def set_user_cpf(self, value: str) -> None:
+        self.user_cpf = format_cpf(value)
+
+    def set_profile_photo(self, value: str) -> None:
+        self.user_profile_photo = value.strip()
+
+    def load_profile(self) -> None:
+        """Load the current user's profile without exposing auth data."""
+        if not self.auth_token:
+            return
+        api_url = self.get_xano_api_url()
+        if not api_url:
+            self.profile_error = "O perfil ainda não está configurado neste ambiente."
+            return
+        self.profile_error = ""
+        try:
+            profile = fetch_user_profile(self.auth_token, api_url)
+            self.profile_exists = bool(profile)
+            self.user_full_name = profile.get("nome_completo") or self.user_full_name
+            self.user_cpf = format_cpf(profile.get("cpf", ""))
+            self.user_phone = format_phone(profile.get("telefone", ""))
+            self.user_profile_photo = profile.get("foto_perfil") or self.user_profile_photo
+        except requests.RequestException:
+            self.profile_error = "Não foi possível carregar seu perfil. Tente novamente."
+        except ValueError:
+            self.profile_error = "O perfil retornado pelo Xano é inválido."
+
+    def save_profile(self) -> None:
+        """Create or update only the profile owned by the current token."""
+        self.profile_error = ""
+        self.profile_message = ""
+        cpf = digits_only(self.user_cpf)
+        phone = digits_only(self.user_phone)
+        if self.user_full_name.strip() == "":
+            self.profile_error = "Informe seu nome completo."
+            return
+        if cpf and len(cpf) != 11:
+            self.profile_error = "Informe um CPF válido."
+            return
+        if phone and len(phone) not in {10, 11}:
+            self.profile_error = "Informe um telefone válido."
+            return
+        if not self.auth_token:
+            self.profile_error = "Sua sessão expirou. Entre novamente."
+            return
+        api_url = self.get_xano_api_url()
+        if not api_url:
+            self.profile_error = "O perfil ainda não está configurado neste ambiente."
+            return
+        self.profile_is_loading = True
+        payload = {
+            "nome_completo": self.user_full_name.strip(),
+            "cpf": cpf,
+            "telefone": phone,
+            "foto_perfil": self.user_profile_photo.strip() or None,
+        }
+        try:
+            profile = save_user_profile(
+                self.auth_token,
+                api_url,
+                payload,
+                "PUT" if self.profile_exists else "POST",
+            )
+            self.profile_exists = True
+            self.user_full_name = profile.get("nome_completo") or self.user_full_name
+            self.user_cpf = format_cpf(profile.get("cpf", cpf))
+            self.user_phone = format_phone(profile.get("telefone", phone))
+            self.user_profile_photo = profile.get("foto_perfil") or self.user_profile_photo
+            self.profile_message = "Dados atualizados com sucesso."
+        except XanoAPIError as error:
+            self.profile_error = error.message
+        except requests.RequestException:
+            self.profile_error = "Não foi possível salvar seu perfil. Tente novamente."
+        except ValueError:
+            self.profile_error = "O perfil retornado pelo Xano é inválido."
+        finally:
+            self.profile_is_loading = False
 
     def handle_profile_upload(self):
         """Mock upload handler: just sets a placeholder image."""
@@ -783,12 +944,13 @@ class OperationalState(rx.State):
                 self.providers = self.providers
 
 
-    def submit_customer_request(self, service_type: str):
+    async def submit_customer_request(self, service_type: str):
         """Simulate the process of requesting help."""
         self.selected_service = service_type
         self.request_status = "searching"
         # Simulate a match after 3 seconds.
-        return rx.set_timeout(self._simulate_match, 3000)
+        await asyncio.sleep(3)
+        self._simulate_match()
 
     def _simulate_match(self):
         """Private method to simulate finding a provider."""
@@ -1068,8 +1230,8 @@ def signup_screen() -> rx.Component:
                         spacing="1",
                         align="start",
                     ),
-                    on_click=AppState.choose_signup_role("client"),
-                    class_name=rx.cond(AppState.signup_role == "client", "role-card selected", "role-card"),
+                        on_click=AppState.choose_signup_role("cliente"),
+                    class_name=rx.cond(AppState.signup_role == "cliente", "role-card selected", "role-card"),
                     flex="1",
                 ),
                 rx.button(
@@ -1079,8 +1241,8 @@ def signup_screen() -> rx.Component:
                         spacing="1",
                         align="start",
                     ),
-                    on_click=AppState.choose_signup_role("provider"),
-                    class_name=rx.cond(AppState.signup_role == "provider", "role-card selected", "role-card"),
+                    on_click=AppState.choose_signup_role("prestador"),
+                    class_name=rx.cond(AppState.signup_role == "prestador", "role-card selected", "role-card"),
                     flex="1",
                 ),
                 width="100%",
@@ -1719,14 +1881,18 @@ def provider_dashboard() -> rx.Component:
 
 
 def profile_screen() -> rx.Component:
-    """Unified profile screen for both clients and providers."""
+    """Shared authenticated profile screen for clients and providers."""
     return rx.center(
         rx.vstack(
             # Top Navigation / Back Button
             rx.hstack(
                 rx.button(
                     rx.hstack(rx.text("←", font_size="1.2rem"), rx.text("Voltar")),
-                    on_click=rx.redirect("/home"),
+                    on_click=rx.cond(
+                        AppState.user_role == "prestador",
+                        rx.redirect("/home_provider"),
+                        rx.redirect("/home_client"),
+                    ),
                     class_name="secondary-button",
                     size="1",
                 ),
@@ -1736,8 +1902,11 @@ def profile_screen() -> rx.Component:
             ),
             # Header Section
             rx.vstack(
-                rx.text("meu perfil", class_name="section-kicker"),
-                rx.heading("Configurações de Perfil", class_name="section-title", size="8"),
+                rx.text(
+                    rx.cond(AppState.user_role == "prestador", "perfil do prestador", "perfil do cliente"),
+                    class_name="section-kicker",
+                ),
+                rx.heading("Mantenha seus dados em dia.", class_name="section-title", size="8"),
                 rx.text("Mantenha seus dados atualizados para melhor assistência.", class_name="section-intro"),
                 align="start",
                 spacing="2",
@@ -1766,8 +1935,8 @@ def profile_screen() -> rx.Component:
                         overflow="hidden",
                     ),
                     rx.button(
-                        "Alterar Foto",
-                        on_click=AppState.handle_profile_upload,
+                        "Usar foto por URL",
+                        on_click=rx.call_script("document.getElementById('profile-photo-url').focus()"),
                         class_name="secondary-button",
                         size="1",
                     ),
@@ -1783,11 +1952,31 @@ def profile_screen() -> rx.Component:
                         rx.input(
                             value=AppState.user_full_name,
                             on_change=AppState.set_user_full_name,
+                            class_name="profile-input",
                             width="100%",
                             height="3.25rem",
                             padding="0 1rem",
                             border_radius="14px",
                             border=f"1px solid {COLORS['line']}",
+                        ),
+                        width="100%",
+                        spacing="2",
+                        align="start",
+                    ),
+                    rx.vstack(
+                        rx.text("CPF", class_name="field-label"),
+                        rx.input(
+                            value=AppState.user_cpf,
+                            on_change=AppState.set_user_cpf,
+                            placeholder="000.000.000-00",
+                            class_name="profile-input",
+                            width="100%",
+                            height="3.25rem",
+                            padding="0 1rem",
+                            border_radius="14px",
+                            border=f"1px solid {COLORS['line']}",
+                            background="#F1F5F9",
+                            color=COLORS["text"],
                         ),
                         width="100%",
                         spacing="2",
@@ -1798,6 +1987,7 @@ def profile_screen() -> rx.Component:
                         rx.input(
                             value=AppState.user_email,
                             on_change=AppState.set_user_email,
+                            class_name="profile-input",
                             width="100%",
                             height="3.25rem",
                             padding="0 1rem",
@@ -1809,10 +1999,31 @@ def profile_screen() -> rx.Component:
                         align="start",
                     ),
                     rx.vstack(
+                        rx.text("Foto de perfil (URL opcional)", class_name="field-label"),
+                        rx.input(
+                            id="profile-photo-url",
+                            value=AppState.user_profile_photo,
+                            on_change=AppState.set_profile_photo,
+                            placeholder="https://...",
+                            class_name="profile-input",
+                            width="100%",
+                            height="3.25rem",
+                            padding="0 1rem",
+                            border_radius="14px",
+                            border=f"1px solid {COLORS['line']}",
+                            background="#F1F5F9",
+                            color=COLORS["text"],
+                        ),
+                        width="100%",
+                        spacing="2",
+                        align="start",
+                    ),
+                    rx.vstack(
                         rx.text("Telefone", class_name="field-label"),
                         rx.input(
                             value=AppState.user_phone,
                             on_change=AppState.set_user_phone,
+                            class_name="profile-input",
                             width="100%",
                             height="3.25rem",
                             padding="0 1rem",
@@ -1830,7 +2041,7 @@ def profile_screen() -> rx.Component:
                 ),
                 # Role Specific: Provider Specialties
                 rx.cond(
-                    AppState.user_role == "provider",
+                    AppState.user_role == "prestador",
                     rx.vstack(
                         rx.text("Minhas Especialidades", weight="bold", size="4", color=COLORS["navy"]),
                         rx.grid(
@@ -1888,7 +2099,20 @@ def profile_screen() -> rx.Component:
                     width="100%",
                     align="start",
                 ),
-                rx.button("Salvar Perfil", class_name="primary-button", width="100%"),
+                rx.button(
+                    rx.cond(AppState.profile_is_loading, "Salvando...", "Salvar/Atualizar Dados"),
+                    on_click=AppState.save_profile,
+                    class_name="primary-button",
+                    width="100%",
+                ),
+                rx.cond(
+                    AppState.profile_error != "",
+                    rx.text(AppState.profile_error, class_name="error-message"),
+                ),
+                rx.cond(
+                    AppState.profile_message != "",
+                    rx.text(AppState.profile_message, class_name="success-message"),
+                ),
                 width="100%",
                 max_width="600px",
                 spacing="5",
@@ -1904,7 +2128,8 @@ def profile_screen() -> rx.Component:
             OperationalState.show_vehicle_modal,
             vehicle_modal(),
         ),
-        background="white",
+        on_mount=AuthState.load_profile,
+        background=COLORS["background"],
         width="100%",
         min_height="100vh",
     )
@@ -1946,7 +2171,7 @@ def home_screen() -> rx.Component:
             spacing="4",
         ),
         on_mount=rx.cond(
-            AppState.user_role == "provider",
+            AppState.user_role == "prestador",
             rx.redirect("/home_provider"),
             rx.redirect("/home_client"),
         ),
@@ -2807,4 +3032,6 @@ app.add_page(lambda: protected_page(service_details_screen), route="/service-det
 app.add_page(lambda: protected_page(provider_service_progress_screen), route="/provider-service-progress", title="Atendimento em Andamento | SOS Drive")
 app.add_page(lambda: protected_page(service_finalized_screen), route="/service-finalized", title="Chamado Finalizado | SOS Drive")
 app.add_page(lambda: protected_page(profile_screen), route="/profile", title="Meu Perfil | SOS Drive")
+app.add_page(lambda: protected_page(profile_screen), route="/perfil-cliente", title="Perfil Cliente | SOS Drive")
+app.add_page(lambda: protected_page(profile_screen), route="/perfil-prestador", title="Perfil Prestador | SOS Drive")
 app.add_page(lambda: protected_page(map_test_screen), route="/test-map", title="Teste de Mapa | SOS Drive")

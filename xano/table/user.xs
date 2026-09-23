@@ -9,9 +9,9 @@ table user {
     email? email filters=trim|lower
     password? password filters=min:8|minAlpha:1|minDigit:1
   
-    // The type of account used to select the correct application home.
+    // The type of account used to select the correct application profile.
     enum role? {
-      values = ["client", "provider"]
+      values = ["cliente", "prestador"]
     }
   
     object password_reset? {

@@ -7,7 +7,7 @@ query "auth/signup" verb=POST {
     email email? filters=trim|lower
     text password?
     enum role? {
-      values = ["client", "provider"]
+      values = ["cliente", "prestador"]
     }
   }
 

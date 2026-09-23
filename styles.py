@@ -69,6 +69,12 @@ GLOBAL_STYLE = {
     ".role-detail": {"color": COLORS["muted"], "font_size": ".78rem"},
     ".login-panel": {"padding": "clamp(1.25rem, 5vw, 3rem)", "border_radius": "1.5rem", "background": "rgba(255,255,255,.95)", "box_shadow": "0 24px 70px rgba(15,23,42,.15)"},
     ".field-label": {"color": COLORS["navy"], "font_size": ".85rem", "font_weight": "800"},
+    ".profile-input": {
+        "border": "1px solid transparent",
+        "background": "#F1F5F9",
+        "color": COLORS["text"],
+        "_focus": {"border_color": COLORS["navy"], "outline": "none"},
+    },
     ".error-message": {"color": "#B91C1C", "font_size": ".9rem", "font_weight": "700"},
     ".success-message": {"color": "#166534", "font_size": ".9rem", "font_weight": "700"},
     ".glass-panel": {

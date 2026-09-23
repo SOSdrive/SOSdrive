@@ -50,6 +50,7 @@ query "auth/login" verb=POST {
   response = {
     authToken: $authToken
     user_id: $user.id
+    role: $user.role
   }
   tags = ["xano:quick-start"]
   guid = "N40bRlF_9-U5a0CYUnz0-d_guGI"

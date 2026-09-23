@@ -4,6 +4,7 @@
 
 A URL pública do workspace Xano não está versionada no projeto. A integração precisa ser configurável sem expor endpoint sensível, credenciais ou senha do usuário no código.
 
+
 ## Decisions
 
 ### Navigation and state
