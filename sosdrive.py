@@ -11,6 +11,7 @@ import time
 import asyncio
 import json
 import logging
+import base64
 from collections.abc import Callable
 
 from styles import GLOBAL_STYLE, COLORS
@@ -21,13 +22,26 @@ logger = logging.getLogger(__name__)
 
 def validate_signup(name: str, email: str, password: str) -> str:
     """Return a local signup validation message, or an empty string."""
-    if not all((name.strip(), email.strip(), password)):
+    if not all((name.strip(), email.strip(), password.strip())):
         return "Preencha nome, email e senha para continuar."
     return ""
 
 
 def digits_only(value: str) -> str:
     return "".join(character for character in value if character.isdigit())
+
+
+def build_image_data_url(file_name: str, content: bytes) -> str:
+    """Convert a selected profile image into a base64 data URL supported by the frontend."""
+    lower_name = (file_name or "profile-image").lower()
+    if lower_name.endswith(".jpg") or lower_name.endswith(".jpeg"):
+        mime_type = "image/jpeg"
+    elif lower_name.endswith(".png"):
+        mime_type = "image/png"
+    else:
+        mime_type = "image/png"
+    encoded = base64.b64encode(content).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def format_cpf(value: str) -> str:
@@ -208,14 +222,39 @@ def fetch_user_profile(auth_token: str, api_url: str) -> dict:
     return payload
 
 
-def save_user_profile(auth_token: str, api_url: str, payload: dict, method: str) -> dict:
+def save_user_profile(
+    auth_token: str,
+    api_url: str,
+    payload: dict,
+    method: str,
+    profile_file: dict | None = None,
+) -> dict:
     """Create or update the profile owned by the current Xano token."""
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    request_kwargs = {"headers": headers, "timeout": 10}
+
+    if profile_file:
+        form_data = {
+            "nome_completo": payload.get("nome_completo"),
+            "cpf": payload.get("cpf"),
+            "telefone": payload.get("telefone"),
+        }
+        files = {
+            profile_file.get("field_name", "foto_perfil"): (
+                profile_file.get("name", "profile-image"),
+                profile_file.get("content", b""),
+                profile_file.get("mime_type", "image/png"),
+            )
+        }
+        request_kwargs["files"] = files
+        request_kwargs["data"] = form_data
+    else:
+        request_kwargs["json"] = payload
+
     response = requests.request(
         method,
         f"{api_url.rstrip('/')}/user_profile",
-        headers={"Authorization": f"Bearer {auth_token}"},
-        json=payload,
-        timeout=10,
+        **request_kwargs,
     )
     if response.status_code >= 400:
         raise XanoAPIError(response.status_code, _response_message(response))
@@ -267,6 +306,7 @@ class AuthState(rx.State):
 
     # Profile Fields (Mock)
     user_profile_photo: str = ""
+    selected_profile_image: str = ""
     user_full_name: str = "Usuário SOS"
     user_email: str = "usuario@exemplo.com"
     user_phone: str = "(11) 99999-9999"
@@ -312,10 +352,17 @@ class AuthState(rx.State):
     def signup(self) -> None:
         self.signup_message = ""
         self.error_message = ""
+
+        clean_name = (self.signup_name or "").strip()
+        clean_email = (self.signup_email or "").strip()
+        clean_password = self.signup_password or ""
+        self.signup_name = clean_name
+        self.signup_email = clean_email
+
         self.error_message = validate_signup(
-            self.signup_name,
-            self.signup_email,
-            self.signup_password,
+            clean_name,
+            clean_email,
+            clean_password,
         )
         if self.error_message:
             self.signup_password = ""
@@ -330,9 +377,9 @@ class AuthState(rx.State):
 
         try:
             auth_token, user_id = signup_with_xano(
-                self.signup_name,
-                self.signup_email,
-                self.signup_password,
+                clean_name,
+                clean_email,
+                clean_password,
                 self.signup_role,
                 api_url,
             )
@@ -341,11 +388,12 @@ class AuthState(rx.State):
             self.load_current_user()
             self.signup_name = ""
             self.signup_email = ""
+            self.signup_password = ""
             return self.redirect_to_user_home()
         except SignupConflictError:
-            self.error_message = "Este e-mail já está em uso."
+            self.error_message = "Este e-mail já está cadastrado. Faça login ou tente outro."
         except XanoAPIError as error:
-            self.error_message = error.message
+            self.error_message = error.message or "Não foi possível criar sua conta. Tente novamente."
         except (requests.RequestException, RuntimeError, ValueError) as error:
             logger.exception("Xano signup request failed: %s", error)
             self.error_message = "Não foi possível conectar ao Xano. Tente novamente."
@@ -377,7 +425,13 @@ class AuthState(rx.State):
         return rx.redirect("/login")
 
     def get_xano_api_url(self) -> str:
-        return os.getenv("XANO_API_URL", "").strip().rstrip("/")
+        configured_url = os.getenv("XANO_API_URL", "").strip().rstrip("/")
+        if configured_url:
+            return configured_url
+
+        fallback_url = "https://x8ki-letl-twmt.n7.xano.io/api:9gPvpDtO"
+        os.environ["XANO_API_URL"] = fallback_url
+        return fallback_url
 
     def set_authenticated_user(self, auth_token: str, user: dict) -> None:
         self.auth_token = auth_token
@@ -453,7 +507,7 @@ class AuthState(rx.State):
         self.is_loading = True
         api_url = self.get_xano_api_url()
         if not api_url:
-            self.error_message = "O login ainda não está configurado neste ambiente."
+            self.error_message = "Não foi possível conectar ao Xano. Tente novamente."
             self.password = ""
             self.is_loading = False
             return
@@ -469,7 +523,7 @@ class AuthState(rx.State):
         except InvalidCredentialsError:
             self.error_message = "E-mail ou senha inválidos."
         except XanoAPIError as error:
-            self.error_message = error.message
+            self.error_message = error.message or "Não foi possível conectar ao Xano. Tente novamente."
         except (requests.RequestException, RuntimeError, ValueError) as error:
             logger.exception("Xano login request failed: %s", error)
             self.error_message = "Não foi possível conectar ao Xano. Tente novamente."
@@ -508,6 +562,7 @@ class AuthState(rx.State):
             self.user_cpf = format_cpf(profile.get("cpf", ""))
             self.user_phone = format_phone(profile.get("telefone", ""))
             self.user_profile_photo = profile.get("foto_perfil") or self.user_profile_photo
+            self.selected_profile_image = self.user_profile_photo
         except requests.RequestException:
             self.profile_error = "Não foi possível carregar seu perfil. Tente novamente."
         except ValueError:
@@ -536,24 +591,39 @@ class AuthState(rx.State):
             self.profile_error = "O perfil ainda não está configurado neste ambiente."
             return
         self.profile_is_loading = True
+        photo_value = self.selected_profile_image or self.user_profile_photo
         payload = {
             "nome_completo": self.user_full_name.strip(),
             "cpf": cpf,
             "telefone": phone,
-            "foto_perfil": self.user_profile_photo.strip() or None,
+            "foto_perfil": photo_value.strip() if isinstance(photo_value, str) else None,
         }
+        profile_file = None
+        if self.selected_profile_image and self.selected_profile_image.startswith("data:image/"):
+            encoded = self.selected_profile_image.split(",", 1)[1]
+            file_content = base64.b64decode(encoded)
+            file_name = f"profile-{self.user_id or 'user'}.png"
+            profile_file = {
+                "field_name": "foto_perfil",
+                "name": file_name,
+                "content": file_content,
+                "mime_type": "image/png",
+            }
+
         try:
             profile = save_user_profile(
                 self.auth_token,
                 api_url,
                 payload,
                 "PUT" if self.profile_exists else "POST",
+                profile_file=profile_file,
             )
             self.profile_exists = True
             self.user_full_name = profile.get("nome_completo") or self.user_full_name
             self.user_cpf = format_cpf(profile.get("cpf", cpf))
             self.user_phone = format_phone(profile.get("telefone", phone))
-            self.user_profile_photo = profile.get("foto_perfil") or self.user_profile_photo
+            self.user_profile_photo = profile.get("foto_perfil") or photo_value or self.user_profile_photo
+            self.selected_profile_image = self.user_profile_photo
             self.profile_message = "Dados atualizados com sucesso."
         except XanoAPIError as error:
             self.profile_error = error.message
@@ -564,11 +634,26 @@ class AuthState(rx.State):
         finally:
             self.profile_is_loading = False
 
-    def handle_profile_upload(self):
-        """Mock upload handler: just sets a placeholder image."""
-        # In a real app, we'd handle the upload via rx.upload
-        # For mock, we just use a sample image.
-        self.user_profile_photo = "https://i.pravatar.cc/300"
+    def handle_profile_upload(self, files: list[rx.UploadFile] | None = None):
+        """Store a local image preview and keep it ready for the profile save payload."""
+        if not files:
+            return
+
+        uploaded_file = files[0]
+        file_like = getattr(uploaded_file, "file", None)
+        if file_like is None:
+            return
+
+        try:
+            file_like.seek(0)
+            contents = file_like.read()
+            file_name = getattr(uploaded_file, "name", None) or "profile-image"
+            data_url = build_image_data_url(file_name, contents)
+            self.selected_profile_image = data_url
+            self.user_profile_photo = data_url
+            self.profile_error = ""
+        except Exception:
+            self.profile_error = "Não foi possível carregar a imagem selecionada."
 
 
 AppState = AuthState
@@ -1257,6 +1342,7 @@ def signup_screen() -> rx.Component:
                         rx.input(
                             type="password",
                             placeholder="Crie uma senha",
+                            value=AppState.signup_password,
                             on_change=AppState.set_signup_password,
                             width="100%",
                             height="3.25rem",
@@ -1323,6 +1409,7 @@ def login_screen() -> rx.Component:
                         rx.input(
                             type="password",
                             placeholder="Sua senha",
+                            value=AppState.password,
                             on_change=AppState.set_password_value,
                             width="100%",
                             height="3.25rem",
@@ -1916,29 +2003,38 @@ def profile_screen() -> rx.Component:
             rx.vstack(
                 # Profile Header with Avatar and Upload
                 rx.vstack(
-                    rx.box(
-                        rx.cond(
-                            AppState.user_profile_photo != "",
-                            rx.image(src=AppState.user_profile_photo, width="100%", height="100%", border_radius="50%", object_fit="cover"),
-                            rx.center(
-                                rx.text(AppState.user_initials, font_size="2rem", weight="bold", color=COLORS["text"]),
-                                width="100%",
-                                height="100%",
-                                background=COLORS["line"],
+                    rx.upload(
+                        rx.vstack(
+                            rx.box(
+                                rx.cond(
+                                    AppState.user_profile_photo != "",
+                                    rx.image(src=AppState.user_profile_photo, width="100%", height="100%", border_radius="50%", object_fit="cover"),
+                                    rx.center(
+                                        rx.text(AppState.user_initials, font_size="2rem", weight="bold", color=COLORS["text"]),
+                                        width="100%",
+                                        height="100%",
+                                        background=COLORS["line"],
+                                        border_radius="50%",
+                                    ),
+                                ),
+                                width="100px",
+                                height="100px",
+                                border=f"3px solid {COLORS['emergency_orange']}",
                                 border_radius="50%",
+                                overflow="hidden",
+                                cursor="pointer",
                             ),
+                            rx.text("Alterar Foto", font_size="0.8rem", weight="bold", color=COLORS["navy"]),
+                            align="center",
+                            spacing="2",
                         ),
-                        width="100px",
-                        height="100px",
-                        border=f"3px solid {COLORS['emergency_orange']}",
-                        border_radius="50%",
-                        overflow="hidden",
-                    ),
-                    rx.button(
-                        "Usar foto por URL",
-                        on_click=rx.call_script("document.getElementById('profile-photo-url').focus()"),
-                        class_name="secondary-button",
-                        size="1",
+                        on_drop=AppState.handle_profile_upload,
+                        accept={"image/jpeg": [".jpg", ".jpeg"], "image/png": [".png"]},
+                        max_files=1,
+                        multiple=False,
+                        no_drag=False,
+                        no_click=False,
+                        class_name="profile-upload-dropzone",
                     ),
                     align="center",
                     spacing="3",
@@ -1993,26 +2089,6 @@ def profile_screen() -> rx.Component:
                             padding="0 1rem",
                             border_radius="14px",
                             border=f"1px solid {COLORS['line']}",
-                        ),
-                        width="100%",
-                        spacing="2",
-                        align="start",
-                    ),
-                    rx.vstack(
-                        rx.text("Foto de perfil (URL opcional)", class_name="field-label"),
-                        rx.input(
-                            id="profile-photo-url",
-                            value=AppState.user_profile_photo,
-                            on_change=AppState.set_profile_photo,
-                            placeholder="https://...",
-                            class_name="profile-input",
-                            width="100%",
-                            height="3.25rem",
-                            padding="0 1rem",
-                            border_radius="14px",
-                            border=f"1px solid {COLORS['line']}",
-                            background="#F1F5F9",
-                            color=COLORS["text"],
                         ),
                         width="100%",
                         spacing="2",
