@@ -264,6 +264,33 @@ def save_user_profile(
     return result
 
 
+def get_xano_services_url() -> str:
+    """Return the base URL for service and vehicle endpoints."""
+    configured_url = os.getenv("XANO_SERVICES_URL", "").strip().rstrip("/")
+    if configured_url:
+        return configured_url
+
+    api_url = os.getenv("XANO_API_URL", "").strip().rstrip("/")
+    if api_url:
+        return api_url
+
+    return "https://x8ki-letl-twmt.n7.xano.io/api:9gPvpDtO"
+
+
+def fetch_user_vehicles_xano(auth_token: str, api_url: str) -> list[dict]:
+    """Fetch the authenticated user's vehicles from Xano."""
+    endpoint = f"{api_url.rstrip('/')}/my_vehicles"
+    response = requests.get(
+        endpoint,
+        headers={"Authorization": f"Bearer {auth_token}"},
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise XanoAPIError(response.status_code, _response_message(response))
+    result = response.json()
+    return result if isinstance(result, list) else []
+
+
 def build_atendimento_mock(request: dict, provider_coords: list[float]) -> dict:
     """Build a local/mock attendance payload from one accepted request."""
     return {
@@ -799,21 +826,59 @@ class OperationalState(rx.State):
             self.v_year = 2024
             self.v_color = ""
 
+    def open_new_vehicle_modal(self):
+        """Open the vehicle form for a new vehicle."""
+        self.open_vehicle_modal()
+
     def close_vehicle_modal(self):
         self.show_vehicle_modal = False
         self.editing_vehicle_id = None
 
     def save_vehicle(self):
-        """Save vehicle data (create or update)."""
+        """Save a vehicle through Xano and refresh the profile list."""
         if not self.v_plate or not self.v_brand or not self.v_model:
-            return # Simple validation
+            return rx.toast("Preencha marca, modelo e placa.")
 
-        if self.editing_vehicle_id:
-            self.update_vehicle(self.editing_vehicle_id, self.v_brand, self.v_model, self.v_plate, self.v_year, self.v_color)
-        else:
-            self.add_vehicle(self.v_brand, self.v_model, self.v_plate, self.v_year, self.v_color)
+        token = AuthState.auth_token
+        if not isinstance(token, str) or not token.strip():
+            return rx.toast("Sessão expirada. Faça login novamente.")
 
-        self.close_vehicle_modal()
+        api_url = get_xano_services_url()
+        payload = {
+            "brand": self.v_brand,
+            "model": self.v_model,
+            "plate": self.v_plate,
+            "year": int(self.v_year) if str(self.v_year).isdigit() else 2024,
+            "color": self.v_color,
+        }
+        try:
+            response = requests.post(
+                f"{api_url}/vehicles",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if response.status_code >= 400:
+                raise XanoAPIError(response.status_code, _response_message(response))
+            self.load_user_vehicles()
+            self.close_vehicle_modal()
+            return rx.toast("Veículo cadastrado com sucesso!")
+        except Exception as error:
+            logger.exception("Failed to save vehicle: %s", error)
+            return rx.toast("Não foi possível salvar o veículo. Tente novamente.")
+
+    def load_user_vehicles(self):
+        """Load the authenticated user's vehicles without blocking the profile."""
+        token = AuthState.auth_token
+        if not isinstance(token, str) or not token.strip():
+            self.user_vehicles = []
+            return
+
+        try:
+            self.user_vehicles = fetch_user_vehicles_xano(token, get_xano_services_url())
+        except Exception as error:
+            logger.exception("Failed to load user vehicles: %s", error)
+            self.user_vehicles = []
 
 
     def toggle_provider_status(self):
@@ -1157,28 +1222,6 @@ def vehicle_card(v: dict) -> rx.Component:
                 rx.text(f"Placa: {v['plate']}", font_size="0.8rem", color=COLORS["text"]),
                 align="start",
                 spacing="1",
-            ),
-            rx.spacer(),
-            rx.hstack(
-                rx.button(
-                    "✏️",
-                    on_click=lambda: OperationalState.open_vehicle_modal(v["id"]),
-                    class_name="glass-panel",
-                    padding="0.4rem",
-                    border_radius="8px",
-                    width="2.2rem",
-                    height="2.2rem",
-                ),
-                rx.button(
-                    "🗑️",
-                    on_click=lambda: OperationalState.delete_vehicle(v["id"]),
-                    class_name="glass-panel",
-                    padding="0.4rem",
-                    border_radius="8px",
-                    width="2.2rem",
-                    height="2.2rem",
-                ),
-                spacing="2",
             ),
             width="100%",
             align="center",
@@ -2152,7 +2195,7 @@ def profile_screen() -> rx.Component:
                         rx.spacer(),
                         rx.button(
                             "Adicionar",
-                            on_click=lambda: OperationalState.open_vehicle_modal(),
+                            on_click=OperationalState.open_new_vehicle_modal,
                             class_name="secondary-button",
                             size="1",
                         ),
@@ -2204,7 +2247,7 @@ def profile_screen() -> rx.Component:
             OperationalState.show_vehicle_modal,
             vehicle_modal(),
         ),
-        on_mount=AuthState.load_profile,
+        on_mount=[AuthState.load_profile, OperationalState.load_user_vehicles],
         background=COLORS["background"],
         width="100%",
         min_height="100vh",
