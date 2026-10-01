@@ -18,6 +18,7 @@ from styles import GLOBAL_STYLE, COLORS
 
 
 logger = logging.getLogger(__name__)
+pending_provider_requests: list[dict] = [] # Deprecated: Use Xano polling
 
 
 def validate_signup(name: str, email: str, password: str) -> str:
@@ -272,9 +273,11 @@ def get_xano_services_url() -> str:
 
     api_url = os.getenv("XANO_API_URL", "").strip().rstrip("/")
     if api_url:
+        if api_url.endswith("/api:9gPvpDtO"):
+            return f"{api_url.rsplit('/api:', 1)[0]}/api:service_requests"
         return api_url
 
-    return "https://x8ki-letl-twmt.n7.xano.io/api:9gPvpDtO"
+    return "https://x8ki-letl-twmt.n7.xano.io/api:service_requests"
 
 
 def fetch_user_vehicles_xano(auth_token: str, api_url: str) -> list[dict]:
@@ -289,6 +292,48 @@ def fetch_user_vehicles_xano(auth_token: str, api_url: str) -> list[dict]:
         raise XanoAPIError(response.status_code, _response_message(response))
     result = response.json()
     return result if isinstance(result, list) else []
+
+
+def fetch_pending_requests_xano(auth_token: str, api_url: str) -> list[dict]:
+    """Fetch all pending service requests from Xano for providers."""
+    endpoint = f"{api_url.rstrip('/')}/pending_requests"
+    response = requests.get(
+        endpoint,
+        headers={"Authorization": f"Bearer {auth_token}"},
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise XanoAPIError(response.status_code, _response_message(response))
+    result = response.json()
+    return result if isinstance(result, list) else []
+
+
+def request_service_xano(
+    auth_token: str,
+    api_url: str,
+    service_type: str,
+    vehicle_id: int,
+    latitude: float,
+    longitude: float,
+) -> dict:
+    """Create a service request through Xano."""
+    response = requests.post(
+        f"{api_url.rstrip('/')}/request_service",
+        json={
+            "service_type": service_type,
+            "vehicle_id": vehicle_id,
+            "latitude": latitude,
+            "longitude": longitude,
+        },
+        headers={"Authorization": f"Bearer {auth_token}"},
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise XanoAPIError(response.status_code, _response_message(response))
+    result = response.json()
+    if not isinstance(result, dict):
+        raise ValueError("Unexpected service request response")
+    return result
 
 
 def build_atendimento_mock(request: dict, provider_coords: list[float]) -> dict:
@@ -342,6 +387,7 @@ class AuthState(rx.State):
     profile_error: str = ""
     profile_message: str = ""
     profile_is_loading: bool = False
+    session_validated: bool = False
 
     @rx.var
     def is_authenticated(self) -> bool:
@@ -462,6 +508,8 @@ class AuthState(rx.State):
 
     def set_authenticated_user(self, auth_token: str, user: dict) -> None:
         self.auth_token = auth_token
+        OperationalState.auth_token = auth_token
+        self.session_validated = True
         self.user = user
         self.user_json = json.dumps(user)
         self.user_id = str(user.get("id", ""))
@@ -471,16 +519,36 @@ class AuthState(rx.State):
 
     def clear_session(self) -> None:
         self.auth_token = ""
+        OperationalState.auth_token = ""
         self.user_json = ""
         self.user = {}
         self.user_id = ""
         self.user_role = "cliente"
+        self.user_profile_photo = ""
+        self.selected_profile_image = ""
+        self.user_full_name = "Usuário SOS"
+        self.user_email = "usuario@exemplo.com"
+        self.user_phone = "(11) 99999-9999"
+        self.user_cpf = ""
+        self.profile_exists = False
+        OperationalState.user_vehicles = []
+
+    def expire_session(self):
+        """Clear all authenticated state and return to login."""
+        self.session_validated = False
+        self.error_message = "Sua sessão expirou. Entre novamente."
+        self.clear_session()
+        return rx.redirect("/login")
 
     def load_current_user(self) -> None:
-        """Load the authenticated user using the stored token and user ID."""
-        if not self.auth_token or not self.user_id:
+        """Load the authenticated user using the stored token and, when available, the cached user ID."""
+        if not self.auth_token:
             raise RuntimeError("Authentication session is incomplete")
-        current_user_id = int(self.user_id)
+
+        current_user_id = None
+        if self.user_id and str(self.user_id).strip():
+            current_user_id = int(self.user_id)
+
         endpoint = f"{self.get_xano_api_url()}/auth/me"
         logger.warning(
             "Xano request: GET %s user_id=%s auth_token=<redacted>",
@@ -503,30 +571,43 @@ class AuthState(rx.State):
         if not isinstance(user, dict):
             raise ValueError("Unexpected current user response")
         response_user_id = user.get("id") or user.get("user_id")
-        if response_user_id is not None and int(response_user_id) != current_user_id:
+        if current_user_id is not None and response_user_id is not None and int(response_user_id) != current_user_id:
             raise ValueError("Current user does not match authenticated user")
+        if response_user_id is not None:
+            self.user_id = str(response_user_id)
         self.set_authenticated_user(self.auth_token, user)
 
     def redirect_to_user_home(self):
         if self.user_role == "prestador":
-            return rx.redirect("/perfil-prestador")
-        return rx.redirect("/perfil-cliente")
+            return rx.redirect("/home_provider")
+        return rx.redirect("/home_client")
 
     def restore_session(self):
         """Restore the persisted user and validate the token with Xano."""
+        self.session_validated = False
         if not self.auth_token:
-            self.clear_session()
-            return rx.redirect("/login")
+            # Instead of immediately expiring, we can let them stay on the loading screen
+            # or redirect to login. expire_session() is the correct way to handle this.
+            return self.expire_session()
 
         try:
             if self.user_json:
-                self.user = json.loads(self.user_json)
-                self.user_id = str(self.user.get("id", ""))
-                self.user_role = normalize_user_role(self.user.get("role"))
+                try:
+                    self.user = json.loads(self.user_json)
+                except json.JSONDecodeError:
+                    self.user = {}
+                self.user_id = str(self.user.get("id", self.user_id or ""))
+                if self.user.get("role"):
+                    self.user_role = normalize_user_role(self.user.get("role"))
+
+            # Crucial: Set the token in OperationalState as well before loading
+            OperationalState.auth_token = self.auth_token
+
             self.load_current_user()
-        except (requests.RequestException, ValueError, json.JSONDecodeError, UnsupportedRoleError):
-            self.clear_session()
-            return rx.redirect("/login")
+            self.session_validated = True
+        except (requests.RequestException, RuntimeError, ValueError, UnsupportedRoleError) as e:
+            logger.error("Session restoration failed: %s", e)
+            return self.expire_session()
 
     def login(self) -> None:
         """Authenticate through Xano without retaining the submitted password."""
@@ -590,6 +671,10 @@ class AuthState(rx.State):
             self.user_phone = format_phone(profile.get("telefone", ""))
             self.user_profile_photo = profile.get("foto_perfil") or self.user_profile_photo
             self.selected_profile_image = self.user_profile_photo
+        except requests.HTTPError as error:
+            if error.response is not None and error.response.status_code == 401:
+                return self.expire_session()
+            self.profile_error = "Não foi possível carregar seu perfil. Tente novamente."
         except requests.RequestException:
             self.profile_error = "Não foi possível carregar seu perfil. Tente novamente."
         except ValueError:
@@ -653,6 +738,8 @@ class AuthState(rx.State):
             self.selected_profile_image = self.user_profile_photo
             self.profile_message = "Dados atualizados com sucesso."
         except XanoAPIError as error:
+            if error.status_code == 401:
+                return self.expire_session()
             self.profile_error = error.message
         except requests.RequestException:
             self.profile_error = "Não foi possível salvar seu perfil. Tente novamente."
@@ -710,36 +797,7 @@ class OperationalState(rx.State):
         {"id": 102, "service_type": "Bateria", "coords": [-23.5580, -46.6310], "status": "pending"},
     ]
     is_available: bool = True
-    available_requests: list[dict] = [
-        {
-            "id": 201,
-            "type": "Combustível",
-            "service_icon": "⛽",
-            "user": "Pedro Lima",
-            "phone": "(11) 98888-1111",
-            "vehicle": "Toyota Corolla - ABC-1234",
-            "note": "Estou no acostamento, sem risco imediato.",
-            "distance": "4.1 km",
-            "eta": "9 min",
-            "address": "Av. Paulista, 1578 - Bela Vista, São Paulo",
-            "coords": [-23.5614, -46.6559],
-            "maps_url": "https://www.google.com/maps/dir/?api=1&destination=-23.5614,-46.6559",
-        },
-        {
-            "id": 202,
-            "type": "Troca de Pneu",
-            "service_icon": "🛞",
-            "user": "Ana Souza",
-            "phone": "(11) 97777-2222",
-            "vehicle": "Fiat Mobi - QWE-9087",
-            "note": "Pneu dianteiro esquerdo furou ao sair do estacionamento.",
-            "distance": "2.8 km",
-            "eta": "6 min",
-            "address": "Rua Haddock Lobo, 400 - Cerqueira César, São Paulo",
-            "coords": [-23.5588, -46.6621],
-            "maps_url": "https://www.google.com/maps/dir/?api=1&destination=-23.5588,-46.6621",
-        },
-    ]
+    available_requests: list[dict] = []
     selected_request: dict = {}
     atendimento_mock: dict = {}
     atendimento_phase: str = ""
@@ -747,8 +805,19 @@ class OperationalState(rx.State):
 
 
     # Customer Request state
+    auth_token: str = rx.LocalStorage(name="sos_auth_token", sync=True)
     selected_service: str | None = None
     request_status: str = "idle" # idle, searching, matched
+    selected_vehicle_id: int | None = None
+    selected_vehicle_option: str = ""
+    pending_service_type: str = ""
+    request_id: int | None = None
+    request_server_status: str = ""
+    request_estimated_price: float = 0.0
+    request_distance_km: float = 0.0
+    request_error_message: str = ""
+    show_profile_link: bool = False
+    show_vehicle_selection: bool = False
 
     # Provider identity (simulated)
     current_provider_id: int = 1
@@ -764,6 +833,21 @@ class OperationalState(rx.State):
     v_plate: str = ""
     v_year: int = 2024
     v_color: str = ""
+
+    @rx.var
+    def vehicle_options(self) -> list[str]:
+        """Return vehicle IDs as select options for the request sheet."""
+        return [str(vehicle.get("id", "")) for vehicle in self.user_vehicles]
+
+    @rx.var
+    def request_price_text(self) -> str:
+        """Format the estimated price for the request confirmation."""
+        return f"R$ {self.request_estimated_price:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    @rx.var
+    def request_distance_text(self) -> str:
+        """Format the estimated distance for the request confirmation."""
+        return f"{self.request_distance_km:.1f}".replace(".", ",") + " km"
 
     def add_vehicle(self, brand: str, model: str, plate: str, year: int, color: str):
         """Add a new vehicle to the local mock list."""
@@ -839,9 +923,9 @@ class OperationalState(rx.State):
         if not self.v_plate or not self.v_brand or not self.v_model:
             return rx.toast("Preencha marca, modelo e placa.")
 
-        token = AuthState.auth_token
+        token = self.auth_token
         if not isinstance(token, str) or not token.strip():
-            return rx.toast("Sessão expirada. Faça login novamente.")
+            return AuthState.expire_session()
 
         api_url = get_xano_services_url()
         payload = {
@@ -863,19 +947,29 @@ class OperationalState(rx.State):
             self.load_user_vehicles()
             self.close_vehicle_modal()
             return rx.toast("Veículo cadastrado com sucesso!")
+        except XanoAPIError as error:
+            logger.error("Failed to save vehicle status=%s error=%s", error.status_code, error.message)
+            if error.status_code == 401:
+                return AuthState.expire_session()
+            return rx.toast("Não foi possível salvar o veículo. Tente novamente.")
         except Exception as error:
             logger.exception("Failed to save vehicle: %s", error)
             return rx.toast("Não foi possível salvar o veículo. Tente novamente.")
 
     def load_user_vehicles(self):
         """Load the authenticated user's vehicles without blocking the profile."""
-        token = AuthState.auth_token
+        token = self.auth_token
         if not isinstance(token, str) or not token.strip():
             self.user_vehicles = []
             return
 
         try:
             self.user_vehicles = fetch_user_vehicles_xano(token, get_xano_services_url())
+        except XanoAPIError as error:
+            logger.error("Failed to load user vehicles status=%s error=%s", error.status_code, error.message)
+            self.user_vehicles = []
+            if error.status_code == 401:
+                return AuthState.expire_session()
         except Exception as error:
             logger.exception("Failed to load user vehicles: %s", error)
             self.user_vehicles = []
@@ -889,18 +983,89 @@ class OperationalState(rx.State):
                 p["status"] = "offline" if p["status"] == "online" else "online"
         self.providers = self.providers # Trigger state update
 
+    def _map_xano_to_ui_request(self, xano_req: dict) -> dict:
+        """Convert a Xano request object to the UI format expected by available_requests."""
+        service_type = xano_req.get("service_type", "other")
+
+        # Mapping service types to friendly names and icons
+        type_map = {
+            "tire": ("Troca de Pneu", "🛞"),
+            "battery": ("Bateria", "🔋"),
+            "mechanical": ("Mecânica", "🔧"),
+            "fuel": ("Combustível", "⛽"),
+            "other": ("Outro Problema", "🛠️"),
+        }
+        friendly_name, icon = type_map.get(service_type, ("Solicitação", "🛠️"))
+
+        # Calculate distance from provider's current location
+        provider_lat = self.provider_locations.get(self.current_provider_id, {}).get("lat", self.providers[0]["coords"][0] if self.providers else -23.55)
+        provider_lng = self.provider_locations.get(self.current_provider_id, {}).get("lng", self.providers[0]["coords"][1] if self.providers else -46.63)
+        req_lat = xano_req.get("latitude", 0.0)
+        req_lng = xano_req.get("longitude", 0.0)
+
+        dist_km = self._haversine(provider_lat, provider_lng, req_lat, req_lng)
+
+        # Construct Google Maps URL
+        maps_url = f"https://www.google.com/maps/dir/?api=1&destination={req_lat},{req_lng}"
+
+        return {
+            "id": xano_req.get("id"),
+            "type": friendly_name,
+            "service_icon": icon,
+            "user": (xano_req.get("_user") or {}).get("name") or xano_req.get("user_name") or xano_req.get("name") or "Usuário",
+            "phone": format_phone((xano_req.get("_user") or {}).get("phone") or xano_req.get("user_phone") or xano_req.get("phone") or ""),
+            "vehicle": (xano_req.get("_vehicle") or {}).get("details") or xano_req.get("vehicle_details") or xano_req.get("vehicle") or "Veículo não informado",
+            "note": xano_req.get("note") or "Sem observações.",
+            "distance": f"{dist_km:.1f} km",
+            "eta": f"{int(dist_km * 3 + 5)} min", # Simple mock ETA based on distance
+            "address": xano_req.get("address") or "Endereço não informado",
+            "coords": [req_lat, req_lng],
+            "maps_url": maps_url,
+        }
+
+    @rx.event(background=True)
+    async def poll_pending_requests(self):
+        """Background task that fetches real pending requests from Xano every 20 seconds."""
+        while True:
+            async with self:
+                token = self.auth_token or AuthState.auth_token
+                if not token:
+                    logger.warning("Polling skipped: No auth token available")
+                    await asyncio.sleep(10)
+                    continue
+
+                try:
+                    logger.info("Polling pending requests from Xano...")
+                    raw_requests = fetch_pending_requests_xano(token, get_xano_services_url())
+                    mapped_requests = [self._map_xano_to_ui_request(r) for r in raw_requests]
+                    self.available_requests = mapped_requests
+                    logger.info("Successfully polled %s pending requests from Xano", len(mapped_requests))
+                except Exception as e:
+                    logger.error("Failed to poll pending requests: %s", e)
+
+            await asyncio.sleep(20)
+
+    def refresh_available_requests(self):
+        """Now handled by background polling, but kept for compatibility."""
+        pass
+
+
     def accept_request(self, request_id: int):
-        """Select a request and start local/mock attendance flow."""
+        """Select a request and start local/mock attendance flow only after a real provider accepts."""
         request = next((item for item in self.available_requests if item["id"] == request_id), None)
         if request is None:
             return rx.toast("Solicitação não encontrada.")
         self.selected_request = request
+
+        # IMPORTANT: We use the selected_request data to populate the atendimento_mock
         provider = next((item for item in self.providers if item["id"] == self.current_provider_id), None)
         provider_coords = provider["coords"] if provider else [-23.5505, -46.6333]
+
         self.atendimento_mock = build_atendimento_mock(request, provider_coords)
         self.atendimento_phase = "A_CAMINHO"
         self.show_cancel_confirm = False
         self.available_requests = [item for item in self.available_requests if item["id"] != request_id]
+
         return rx.redirect("/provider-service-progress")
 
     def refuse_request(self, request_id: int):
@@ -1094,13 +1259,110 @@ class OperationalState(rx.State):
                 self.providers = self.providers
 
 
+    @rx.event
     async def submit_customer_request(self, service_type: str):
-        """Simulate the process of requesting help."""
+        """Start a real service request through Xano."""
+        return await self._submit_customer_request(service_type)
+
+    async def _submit_customer_request(self, service_type: str):
+        """Validate request inputs and call Xano without affecting other flows."""
+        self.request_error_message = ""
+        self.show_profile_link = False
+
+        if not self.user_vehicles:
+            self.request_status = "idle"
+            self.request_error_message = "Cadastre um veículo no perfil antes de pedir socorro."
+            self.show_profile_link = True
+            return rx.toast(self.request_error_message)
+
+        if self.selected_vehicle_id is None:
+            if len(self.user_vehicles) == 1:
+                self.selected_vehicle_id = self.user_vehicles[0].get("id")
+                self.selected_vehicle_option = str(self.selected_vehicle_id)
+            else:
+                self.pending_service_type = service_type
+                self.show_vehicle_selection = True
+                return rx.toast("Selecione um veículo para continuar.")
+
+        latitude = self.client_location.get("lat", 0.0)
+        longitude = self.client_location.get("lng", 0.0)
+        if not latitude or not longitude:
+            self.request_status = "idle"
+            self.request_error_message = "Ative sua localização antes de pedir socorro."
+            return rx.toast(self.request_error_message)
+
+        token = self.auth_token or AuthState.auth_token
+        if not isinstance(token, str) or not token.strip():
+            self.request_status = "idle"
+            logger.warning("Service request skipped: authenticated token is unavailable")
+            return AuthState.expire_session()
+
         self.selected_service = service_type
         self.request_status = "searching"
-        # Simulate a match after 3 seconds.
-        await asyncio.sleep(3)
-        self._simulate_match()
+        try:
+            result = request_service_xano(
+                auth_token=token,
+                api_url=get_xano_services_url(),
+                service_type=service_type,
+                vehicle_id=int(self.selected_vehicle_id),
+                latitude=latitude,
+                longitude=longitude,
+            )
+            self.request_id = result.get("request_id")
+            self.request_server_status = str(result.get("status", ""))
+            self.request_estimated_price = float(result.get("estimated_price", 0.0))
+            self.request_distance_km = float(result.get("distance_km", 0.0))
+            self.request_status = "searching"
+            # Keep the request hidden from the provider queue while the customer is still
+            # actively searching. Only real acceptance should expose it to providers.
+            pending_provider_requests[:] = []
+            return
+        except XanoAPIError as error:
+            logger.error(
+                "Request service failed status=%s error=%s",
+                error.status_code,
+                error.message,
+            )
+            self.request_status = "idle"
+            if error.status_code == 401:
+                return AuthState.expire_session()
+            elif error.status_code in {403, 404}:
+                self.request_error_message = "O veículo selecionado não é válido. Escolha outro veículo."
+            elif error.status_code == 400:
+                self.request_error_message = "Os dados da solicitação são inválidos. Confira os dados e tente novamente."
+            else:
+                self.request_error_message = "Não foi possível processar sua solicitação."
+            return rx.toast(self.request_error_message)
+        except Exception as error:
+            logger.exception("Request service failed: %s", error)
+            self.request_status = "idle"
+            self.request_error_message = "Não foi possível processar sua solicitação."
+            return rx.toast(self.request_error_message)
+
+    @rx.event
+    def set_selected_vehicle_option(self, value: str):
+        """Store the vehicle selected in the request sheet."""
+        self.selected_vehicle_option = value
+        try:
+            self.selected_vehicle_id = int(value)
+        except ValueError:
+            self.selected_vehicle_id = None
+
+    @rx.event
+    async def confirm_vehicle_selection(self):
+        """Confirm the selected vehicle and continue the pending request."""
+        if self.selected_vehicle_id is None:
+            return rx.toast("Selecione um veículo para continuar.")
+        self.show_vehicle_selection = False
+        service_type = self.pending_service_type
+        self.pending_service_type = ""
+        if service_type:
+            return await self._submit_customer_request(service_type)
+
+    @rx.event
+    def open_profile_for_request(self):
+        """Open the profile so the user can register a vehicle."""
+        return rx.redirect("/profile")
 
     def _simulate_match(self):
         """Private method to simulate finding a provider."""
@@ -1638,6 +1900,43 @@ def landing_page() -> rx.Component:
     )
 
 
+def vehicle_selection_sheet() -> rx.Component:
+    """Render the state-driven vehicle picker for a service request."""
+    return rx.cond(
+        OperationalState.show_vehicle_selection,
+        rx.box(
+            rx.vstack(
+                rx.text("Selecione seu veículo", weight="bold", size="5", color=COLORS["navy"]),
+                rx.text("Escolha qual veículo precisa de atendimento.", color=COLORS["text"]),
+                rx.select(
+                    OperationalState.vehicle_options,
+                    value=OperationalState.selected_vehicle_option,
+                    on_change=OperationalState.set_selected_vehicle_option,
+                    placeholder="Escolha um veículo",
+                    width="100%",
+                ),
+                rx.button(
+                    "Confirmar veículo",
+                    on_click=OperationalState.confirm_vehicle_selection,
+                    class_name="primary-button",
+                    width="100%",
+                ),
+                spacing="4",
+                width="100%",
+            ),
+            position="fixed",
+            bottom="0",
+            left="0",
+            right="0",
+            z_index="1000",
+            padding="2rem 1rem",
+            background="white",
+            border_radius="24px 24px 0 0",
+            box_shadow="0 -10px 30px rgba(0,0,0,0.15)",
+        ),
+    )
+
+
 def customer_dashboard() -> rx.Component:
     return rx.box(
         # Map Container (Background)
@@ -1653,6 +1952,7 @@ def customer_dashboard() -> rx.Component:
                 "window.initSOSMap('customer-map', [-23.5505, -46.6333], 13);"
             ),
         ),
+        vehicle_selection_sheet(),
         # Top Navigation Bar
         rx.hstack(
             rx.button(
@@ -1811,7 +2111,12 @@ def customer_dashboard() -> rx.Component:
                 OperationalState.request_status == "matched",
                 rx.vstack(
                     rx.text("✅ Profissional encontrado!", weight="bold", color=COLORS["emergency_orange"], text_align="center"),
-                    rx.text("O especialista já foi notificado e está a caminho.", font_size="0.9rem", color=COLORS["text"], text_align="center"),
+                    rx.text(
+                        f"Preço estimado: {OperationalState.request_price_text} · Distância: {OperationalState.request_distance_text}",
+                        font_size="0.9rem",
+                        color=COLORS["text"],
+                        text_align="center",
+                    ),
                     rx.button("Cancelar Pedido", on_click=OperationalState.set_request_status("idle"), class_name="secondary-button", size="1"),
                     spacing="3",
                     align="center",
@@ -1821,6 +2126,23 @@ def customer_dashboard() -> rx.Component:
                     border_radius="16px",
                     margin_top="1rem",
                     border=f"1px solid {COLORS['line']}",
+                ),
+            ),
+            rx.cond(
+                OperationalState.request_error_message != "",
+                rx.vstack(
+                    rx.text(OperationalState.request_error_message, class_name="error-message", text_align="center"),
+                    rx.cond(
+                        OperationalState.show_profile_link,
+                        rx.button(
+                            "Ir para o perfil",
+                            on_click=OperationalState.open_profile_for_request,
+                            class_name="secondary-button",
+                        ),
+                    ),
+                    spacing="2",
+                    align="center",
+                    width="100%",
                 ),
             ),
             width="100%",
@@ -1857,13 +2179,15 @@ def customer_dashboard() -> rx.Component:
         position="relative",
         overflow="hidden",
         # Geolocation Trigger
-        on_mount=rx.call_script(
-            "navigator.geolocation.getCurrentPosition((pos) => { "
-            "const { latitude: lat, longitude: lng } = pos.coords; "
-            "window.updateUserMarker('customer-map', lat, lng); "
-            "window.triggerReflexUpdate({ role: 'client', lat: lat, lng: lng }); "
-            "});"
-        ),
+        on_mount=[
+            rx.call_script(
+                "navigator.geolocation.getCurrentPosition((pos) => { "
+                "const { latitude: lat, longitude: lng } = pos.coords; "
+                "window.updateUserMarker('customer-map', lat, lng); "
+                "window.triggerReflexUpdate({ role: 'client', lat: lat, lng: lng }); "
+                "});"
+            ),
+        ],
     )
 
 
@@ -1878,9 +2202,10 @@ def provider_dashboard() -> rx.Component:
             top="0",
             left="0",
             z_index="0",
-            on_mount=rx.call_script(
-                "window.initSOSMap('provider-map', [-23.5505, -46.6333], 13);"
-            ),
+            on_mount=[
+                rx.call_script("window.initSOSMap('provider-map', [-23.5505, -46.6333], 13);"),
+                OperationalState.poll_pending_requests,
+            ],
         ),
         # Top Navigation Bar
         rx.hstack(
@@ -1898,19 +2223,22 @@ def provider_dashboard() -> rx.Component:
             rx.hstack(
                 profile_avatar(),
                 rx.text(
-                    rx.cond(OperationalState.providers[0]["status"] == "online", "SOU ONLINE", "SOU OFFLINE"),
+                    rx.cond(OperationalState.is_available, "SOU ONLINE", "SOU OFFLINE"),
                     font_size="0.8rem",
                     weight="bold",
                     color=COLORS["text"],
                 ),
                 rx.checkbox(
                     on_change=OperationalState.toggle_provider_status,
-                    checked=rx.cond(OperationalState.providers[0]["status"] == "online", True, False),
+                    checked=OperationalState.is_available,
                 ),
                 spacing="3",
                 align="center",
                 class_name="glass-panel",
                 padding="0.5rem 1rem",
+                background="white",
+                backdrop_filter="blur(10px)",
+                box_shadow="0 2px 10px rgba(0,0,0,0.1)",
             ),
             position="absolute",
             top="2rem",
@@ -2490,9 +2818,12 @@ def provider_home_screen() -> rx.Component:
                 width="100%",
                 height="50vh",
                 position="relative",
-                on_mount=rx.call_script(
-                    "window.initSOSMap('provider-home-map', [-23.5505, -46.6333], 13);"
-                ),
+                on_mount=[
+                    rx.call_script(
+                        "window.initSOSMap('provider-home-map', [-23.5505, -46.6333], 13);"
+                    ),
+                    OperationalState.poll_pending_requests,
+                ],
             ),
             # Lower Half: Requests List
             rx.box(
@@ -2562,7 +2893,10 @@ def provider_home_screen() -> rx.Component:
             height="100vh",
             spacing="0",
         ),
-        on_mount=OperationalState.reset_provider_home,
+        on_mount=[
+            OperationalState.reset_provider_home,
+            OperationalState.poll_pending_requests,
+        ],
         background="white",
         width="100%",
         min_height="100vh",
@@ -3013,7 +3347,19 @@ def service_finalized_screen() -> rx.Component:
 def protected_page(page: Callable[[], rx.Component]) -> rx.Component:
     """Restore and validate the session before rendering a protected page."""
     return rx.box(
-        page(),
+        rx.cond(
+            AuthState.session_validated,
+            page(),
+            rx.center(
+                rx.vstack(
+                    rx.spinner(size="3"),
+                    rx.text("Validando sua sessão...", weight="bold"),
+                    align="center",
+                    spacing="4",
+                ),
+                min_height="100vh",
+            ),
+        ),
         on_mount=AuthState.restore_session,
         width="100%",
         min_height="100vh",
@@ -3032,6 +3378,9 @@ app = rx.App(
         window.sosUserMarkers = {};
 
         window.initSOSMap = function(id, center, zoom) {
+            if (window.sosMaps[id]) {
+                return window.sosMaps[id];
+            }
             const map = L.map(id, { zoomControl: false }).setView(center, zoom);
             L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "" }).addTo(map);
             window.sosMaps[id] = map;
