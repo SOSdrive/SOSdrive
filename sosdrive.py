@@ -3082,6 +3082,10 @@ def provider_service_progress_screen() -> rx.Component:
             id="provider-service-progress-map",
             width="100%",
             height="100vh",
+            position="absolute",
+            top="0",
+            left="0",
+            z_index="0",
             on_mount=rx.call_script(OperationalState.atendimento_route_script),
         ),
         rx.hstack(
@@ -3100,47 +3104,53 @@ def provider_service_progress_screen() -> rx.Component:
             z_index="100",
             align="center",
         ),
+        # Top Progress Pill (The Yellow Line/Pill)
         rx.box(
-            rx.text(
-                OperationalState.atendimento_status_text,
-                font_size="0.8rem",
-                font_weight="bold",
-                color=COLORS["emergency_orange"],
-                letter_spacing="0.08em",
-                text_transform="uppercase",
-            ),
-            rx.text(
-                rx.cond(
-                    OperationalState.atendimento_mock,
-                    OperationalState.atendimento_mock["tipo_problema"],
-                    "Atendimento",
+            rx.hstack(
+                rx.text("🕒", font_size="1.2rem"),
+                rx.vstack(
+                    rx.text(
+                        OperationalState.atendimento_status_text,
+                        font_size="0.8rem",
+                        font_weight="bold",
+                        color=COLORS["emergency_orange"],
+                        letter_spacing="0.08em",
+                        text_transform="uppercase",
+                    ),
+                    rx.text(
+                        rx.cond(
+                            OperationalState.atendimento_mock,
+                            OperationalState.atendimento_mock["tipo_problema"],
+                            "Atendimento",
+                        ),
+                        font_size="1rem",
+                        font_weight="bold",
+                        color=COLORS["navy"],
+                    ),
+                    align="start",
+                    spacing="0",
                 ),
-                font_size="1rem",
-                font_weight="bold",
-                color=COLORS["navy"],
-            ),
-            rx.text(
-                rx.cond(
-                    OperationalState.atendimento_mock,
-                    f"Distância {OperationalState.atendimento_mock['distance']} • ETA {OperationalState.atendimento_mock['eta']}",
-                    "Distância 0.0 km • ETA 0 min",
-                ),
-                font_size="0.85rem",
-                color=COLORS["muted"],
+                spacing="3",
+                align="center",
             ),
             class_name="glass-panel",
             border_radius="14px",
-            padding="0.7rem 0.9rem",
+            padding="0.7rem 1.2rem",
             position="absolute",
             top="5rem",
             left="50%",
             transform="translateX(-50%)",
             z_index="110",
             width="auto",
+            background="white",
+            border=f"2px solid {COLORS['emergency_orange']}",
+            box_shadow="0 4px 12px rgba(0,0,0,0.1)",
         ),
+        # Bottom Summary Panel
         rx.vstack(
             rx.box(
                 rx.vstack(
+                    # User Header
                     rx.hstack(
                         rx.box(
                             rx.text(
@@ -3162,7 +3172,7 @@ def provider_service_progress_screen() -> rx.Component:
                         rx.vstack(
                             rx.text(
                                 rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["nome"], "Cliente"),
-                                font_size="1rem",
+                                font_size="1.1rem",
                                 font_weight="bold",
                                 color=COLORS["navy"],
                             ),
@@ -3178,61 +3188,92 @@ def provider_service_progress_screen() -> rx.Component:
                         align="center",
                         width="100%",
                     ),
+                    # Detailed Summary Grid
+                    rx.grid(
+                        rx.vstack(
+                            rx.text("Veículo", class_name="field-label"),
+                            rx.text(
+                                rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["veiculo"], "Não informado"),
+                                color=COLORS["text"],
+                            ),
+                            spacing="1",
+                        ),
+                        rx.vstack(
+                            rx.text("Endereço", class_name="field-label"),
+                            rx.text(
+                                rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["endereco"], "Não informado"),
+                                color=COLORS["text"],
+                            ),
+                            spacing="1",
+                        ),
+                        columns="2",
+                        spacing="4",
+                        width="100%",
+                    ),
                     rx.vstack(
-                        rx.text("Veículo", class_name="field-label"),
-                        rx.text(
-                            rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["veiculo"], "Não informado"),
-                            color=COLORS["text"],
-                        ),
-                        rx.text("Endereço", class_name="field-label"),
-                        rx.text(
-                            rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["endereco"], "Não informado"),
-                            color=COLORS["text"],
-                        ),
                         rx.text("Observação", class_name="field-label"),
                         rx.text(
                             rx.cond(OperationalState.atendimento_mock, OperationalState.atendimento_mock["observacao"], "Sem observações."),
                             color=COLORS["muted"],
+                            font_size="0.85rem",
                         ),
                         align="start",
                         spacing="1",
                         width="100%",
                     ),
+                    # Action Buttons
                     rx.hstack(
-                        rx.cond(
-                            OperationalState.can_cancel_atendimento,
-                            rx.button(
-                                "Cancelar atendimento",
-                                on_click=OperationalState.open_cancel_confirm,
-                                class_name="secondary-button",
-                                flex="1",
-                            ),
-                        ),
+                        # Button to notify arrival (Sends message/updates status)
                         rx.button(
-                            OperationalState.atendimento_next_action_label,
-                            on_click=OperationalState.advance_atendimento_phase,
+                            rx.hstack(rx.text("💬"), rx.text("Avisar Chegada"), spacing="2"),
+                            on_click=rx.toast("Cliente notificado da sua chegada!"),
+                            class_name="secondary-button",
+                            size="2",
+                            padding_x="1rem",
+                        ),
+                        # Button to open map in external app
+                        rx.button(
+                            rx.hstack(rx.text("📍"), rx.text("Abrir GPS"), spacing="2"),
+                            on_click=rx.redirect(OperationalState.atendimento_mock["maps_url"]),
                             class_name="primary-button",
-                            flex="1",
+                            size="2",
+                            padding_x="1rem",
                         ),
                         width="100%",
+                        justify="between",
                         spacing="3",
                     ),
-                    spacing="4",
+                    # Phase Advancement Button
+                    rx.button(
+                        OperationalState.atendimento_next_action_label,
+                        on_click=OperationalState.advance_atendimento_phase,
+                        class_name="primary-button",
+                        width="100%",
+                        margin_top="1rem",
+                        size="3",
+                        font_weight="bold",
+                    ),
+                    spacing="5",
                     width="100%",
                 ),
                 class_name="op-card",
                 width="100%",
                 max_width="42rem",
+                background="white",
+                border_radius="24px",
+                padding="1.5rem",
+                box_shadow="0 10px 30px rgba(0,0,0,0.15)",
             ),
             width="100%",
             align="center",
             position="absolute",
             left="0",
             right="0",
-            bottom="1rem",
+            bottom="1.5rem",
             z_index="120",
             padding_x="1rem",
         ),
+        # Cancel Confirmation Modal
         rx.cond(
             OperationalState.show_cancel_confirm,
             rx.box(
