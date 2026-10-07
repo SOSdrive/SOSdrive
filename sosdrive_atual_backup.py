@@ -146,6 +146,11 @@ def _safe_log_payload(payload: dict) -> dict:
     }
 
 
+def _auth_headers(auth_token: str) -> dict[str, str]:
+    """Build the authenticated Xano request header without exposing the token."""
+    return {"Authorization": f"Bearer {auth_token}"}
+
+
 def authenticate_with_xano(path: str, payload: dict, api_url: str) -> tuple[str, int]:
     """Call an Xano auth endpoint and return its token and user ID."""
     normalized_url = api_url.strip().rstrip("/")
@@ -225,7 +230,7 @@ def fetch_user_profile(auth_token: str, api_url: str) -> dict:
     """Fetch the profile associated with the current Xano token."""
     response = requests.get(
         f"{api_url.rstrip('/')}/user_profile",
-        headers={"Authorization": f"Bearer {auth_token}"},
+        headers=_auth_headers(auth_token),
         timeout=10,
     )
     if response.status_code == 404:
@@ -247,7 +252,7 @@ def save_user_profile(
     profile_file: dict | None = None,
 ) -> dict:
     """Create or update the profile owned by the current Xano token."""
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    headers = _auth_headers(auth_token)
     request_kwargs = {"headers": headers, "timeout": 10}
 
     if profile_file:
@@ -284,7 +289,7 @@ def save_user_profile(
 def request_service_xano(auth_token: str, api_url: str, service_type: str, vehicle_id: int, lat: float, lng: float) -> dict:
     """Request a service through Xano. user_id is extracted from the token."""
     endpoint = f"{api_url.rstrip('/')}/request_service"
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    headers = _auth_headers(auth_token)
     payload = {
         "service_type": service_type,
         "vehicle_id": vehicle_id,
@@ -304,7 +309,7 @@ def request_service_xano(auth_token: str, api_url: str, service_type: str, vehic
 def get_my_requests_xano(auth_token: str, api_url: str) -> list[dict]:
     """Fetch the service request history for the current user. Returns a direct JSON list."""
     endpoint = f"{api_url.rstrip('/')}/my_requests"
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    headers = _auth_headers(auth_token)
     response = requests.get(endpoint, headers=headers, timeout=10)
     if response.status_code >= 400:
         raise XanoAPIError(response.status_code, _response_message(response))
@@ -315,7 +320,7 @@ def get_my_requests_xano(auth_token: str, api_url: str) -> list[dict]:
 def fetch_user_vehicles_xano(auth_token: str, api_url: str) -> list[dict]:
     """Fetch the authenticated user's vehicles from Xano. Returns a direct JSON list."""
     endpoint = f"{api_url.rstrip('/')}/my_vehicles"
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    headers = _auth_headers(auth_token)
     response = requests.get(endpoint, headers=headers, timeout=10)
     if response.status_code >= 400:
         raise XanoAPIError(response.status_code, _response_message(response))
@@ -469,9 +474,7 @@ class AuthState(rx.State):
         if configured_url:
             return configured_url
 
-        fallback_url = "https://x8ki-letl-twmt.n7.xano.io/api:9gPvpDtO"
-        os.environ["XANO_API_URL"] = fallback_url
-        return fallback_url
+        return ""
 
     def get_xano_services_url(self) -> str:
         """URL for service-related endpoints (requests, vehicles)."""
@@ -509,7 +512,7 @@ class AuthState(rx.State):
         )
         response = requests.get(
             endpoint,
-            headers={"Authorization": f"Bearer {self.auth_token}"},
+            headers=_auth_headers(self.auth_token),
             timeout=10,
         )
         logger.warning(
@@ -900,7 +903,7 @@ class OperationalState(rx.State):
             response = requests.post(
                 endpoint,
                 json=payload,
-                headers={"Authorization": f"Bearer {token}"},
+                headers=_auth_headers(token),
                 timeout=10
             )
             response.raise_for_status()

@@ -17,7 +17,7 @@ table service_request {
     decimal longitude
     decimal estimated_price
     decimal distance_km
-    text status default="pending"
+    text status?="pending"
   }
 
   index = [

@@ -130,6 +130,11 @@ def _safe_log_payload(payload: dict) -> dict:
     }
 
 
+def _auth_headers(auth_token: str) -> dict[str, str]:
+    """Build the only authenticated Xano request header used by the client."""
+    return {"Authorization": f"Bearer {auth_token}"}
+
+
 def authenticate_with_xano(path: str, payload: dict, api_url: str) -> tuple[str, int]:
     """Call an Xano auth endpoint and return its token and user ID."""
     normalized_url = api_url.strip().rstrip("/")
@@ -209,7 +214,7 @@ def fetch_user_profile(auth_token: str, api_url: str) -> dict:
     """Fetch the profile associated with the current Xano token."""
     response = requests.get(
         f"{api_url.rstrip('/')}/user_profile",
-        headers={"Authorization": f"Bearer {auth_token}"},
+        headers=_auth_headers(auth_token),
         timeout=10,
     )
     if response.status_code == 404:
@@ -231,7 +236,7 @@ def save_user_profile(
     profile_file: dict | None = None,
 ) -> dict:
     """Create or update the profile owned by the current Xano token."""
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    headers = _auth_headers(auth_token)
     request_kwargs = {"headers": headers, "timeout": 10}
 
     if profile_file:
@@ -273,11 +278,11 @@ def get_xano_services_url() -> str:
 
     api_url = os.getenv("XANO_API_URL", "").strip().rstrip("/")
     if api_url:
-        if api_url.endswith("/api:9gPvpDtO"):
-            return f"{api_url.rsplit('/api:', 1)[0]}/api:service_requests"
+        # Ensure we use the same API group as the main auth API to avoid 404s
+        # If api_url is '.../api:9gPvpDtO', we stay in that group.
         return api_url
 
-    return "https://x8ki-letl-twmt.n7.xano.io/api:service_requests"
+    return ""
 
 
 def fetch_user_vehicles_xano(auth_token: str, api_url: str) -> list[dict]:
@@ -285,7 +290,7 @@ def fetch_user_vehicles_xano(auth_token: str, api_url: str) -> list[dict]:
     endpoint = f"{api_url.rstrip('/')}/my_vehicles"
     response = requests.get(
         endpoint,
-        headers={"Authorization": f"Bearer {auth_token}"},
+        headers=_auth_headers(auth_token),
         timeout=10,
     )
     if response.status_code >= 400:
@@ -299,7 +304,7 @@ def fetch_pending_requests_xano(auth_token: str, api_url: str) -> list[dict]:
     endpoint = f"{api_url.rstrip('/')}/pending_requests"
     response = requests.get(
         endpoint,
-        headers={"Authorization": f"Bearer {auth_token}"},
+        headers=_auth_headers(auth_token),
         timeout=10,
     )
     if response.status_code >= 400:
@@ -325,7 +330,7 @@ def request_service_xano(
             "latitude": latitude,
             "longitude": longitude,
         },
-        headers={"Authorization": f"Bearer {auth_token}"},
+        headers=_auth_headers(auth_token),
         timeout=10,
     )
     if response.status_code >= 400:
@@ -333,6 +338,100 @@ def request_service_xano(
     result = response.json()
     if not isinstance(result, dict):
         raise ValueError("Unexpected service request response")
+    return result
+
+
+def update_service_request_status_xano(
+    auth_token: str,
+    api_url: str,
+    request_id: int,
+    status: str,
+) -> dict:
+    """Update the status of a service request in Xano using the standard record endpoint."""
+    # Converting to int explicitly to ensure no type mismatch in URL
+    rid = int(request_id)
+    endpoint = f"{api_url.rstrip('/')}/update_request_status"
+
+    logger.info("Xano Update Request: POST %s status=%s", endpoint, status)
+
+    response = requests.post(
+        endpoint,
+        json={"request_id": rid, "status": status},
+        headers=_auth_headers(auth_token),
+        timeout=10,
+    )
+
+    if response.status_code >= 400:
+        logger.error("Xano Update Failed: status=%s", response.status_code)
+        raise XanoAPIError(response.status_code, _response_message(response))
+
+    return response.json()
+
+
+def complete_service_request_xano(
+    auth_token: str,
+    api_url: str,
+    request_id: int,
+) -> dict:
+    """Complete an accepted or in-progress service request through Xano."""
+    rid = int(request_id)
+    endpoint = f"{api_url.rstrip('/')}/{rid}/status"
+    response = requests.patch(
+        endpoint,
+        json={"status": "completed"},
+        headers=_auth_headers(auth_token),
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        logger.error("Xano completion failed: status=%s", response.status_code)
+        raise XanoAPIError(response.status_code, _response_message(response))
+    return response.json()
+
+
+def send_service_message_xano(
+    auth_token: str,
+    api_url: str,
+    request_id: int,
+    message_text: str,
+) -> dict:
+    """Send a message from provider to client in Xano."""
+    rid = int(request_id)
+    endpoint = f"{api_url.rstrip('/')}/{rid}/messages"
+
+    logger.info("Xano Send Message: POST %s payload={'message_text': '%s'}", endpoint, message_text)
+
+    response = requests.post(
+        endpoint,
+        json={"message_text": message_text},
+        headers=_auth_headers(auth_token),
+        timeout=10,
+    )
+
+    if response.status_code >= 400:
+        logger.error("Xano Message Failed: status=%s", response.status_code)
+        raise XanoAPIError(response.status_code, _response_message(response))
+
+    return response.json()
+
+
+def fetch_service_messages_xano(
+    auth_token: str,
+    api_url: str,
+    request_id: int,
+) -> list[dict]:
+    """Fetch the conversation for a service request from Xano."""
+    rid = int(request_id)
+    endpoint = f"{api_url.rstrip('/')}/{rid}/messages"
+    response = requests.get(
+        endpoint,
+        headers=_auth_headers(auth_token),
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise XanoAPIError(response.status_code, _response_message(response))
+    result = response.json()
+    if not isinstance(result, list):
+        raise ValueError("Unexpected service messages response")
     return result
 
 
@@ -502,9 +601,7 @@ class AuthState(rx.State):
         if configured_url:
             return configured_url
 
-        fallback_url = "https://x8ki-letl-twmt.n7.xano.io/api:9gPvpDtO"
-        os.environ["XANO_API_URL"] = fallback_url
-        return fallback_url
+        return ""
 
     def set_authenticated_user(self, auth_token: str, user: dict) -> None:
         self.auth_token = auth_token
@@ -557,7 +654,7 @@ class AuthState(rx.State):
         )
         response = requests.get(
             endpoint,
-            headers={"Authorization": f"Bearer {self.auth_token}"},
+            headers=_auth_headers(self.auth_token),
             timeout=10,
         )
         logger.warning(
@@ -802,6 +899,13 @@ class OperationalState(rx.State):
     atendimento_mock: dict = {}
     atendimento_phase: str = ""
     show_cancel_confirm: bool = False
+    service_messages: list[dict] = []
+    message_draft: str = ""
+    message_error: str = ""
+    show_message_panel: bool = False
+    client_message_draft: str = ""
+    client_message_error: str = ""
+    show_client_message_panel: bool = False
 
 
     # Customer Request state
@@ -939,7 +1043,7 @@ class OperationalState(rx.State):
             response = requests.post(
                 f"{api_url}/vehicles",
                 json=payload,
-                headers={"Authorization": f"Bearer {token}"},
+                headers=_auth_headers(token),
                 timeout=10,
             )
             if response.status_code >= 400:
@@ -1007,14 +1111,23 @@ class OperationalState(rx.State):
 
         # Construct Google Maps URL
         maps_url = f"https://www.google.com/maps/dir/?api=1&destination={req_lat},{req_lng}"
+        user_record = xano_req.get("_user") or xano_req.get("user") or {}
+        vehicle_record = xano_req.get("_vehicle") or xano_req.get("vehicle") or {}
+        vehicle_details = xano_req.get("vehicle_details") or vehicle_record.get("details")
+        if not vehicle_details and vehicle_record:
+            vehicle_details = " ".join(
+                str(vehicle_record.get(field, "")).strip()
+                for field in ("brand", "model", "plate")
+                if vehicle_record.get(field)
+            )
 
         return {
             "id": xano_req.get("id"),
             "type": friendly_name,
             "service_icon": icon,
-            "user": (xano_req.get("_user") or {}).get("name") or xano_req.get("user_name") or xano_req.get("name") or "Usuário",
-            "phone": format_phone((xano_req.get("_user") or {}).get("phone") or xano_req.get("user_phone") or xano_req.get("phone") or ""),
-            "vehicle": (xano_req.get("_vehicle") or {}).get("details") or xano_req.get("vehicle_details") or xano_req.get("vehicle") or "Veículo não informado",
+            "user": user_record.get("name") or xano_req.get("user_name") or xano_req.get("name") or "Usuário",
+            "phone": format_phone(user_record.get("phone") or xano_req.get("user_phone") or xano_req.get("phone") or ""),
+            "vehicle": vehicle_details or "Veículo não informado",
             "note": xano_req.get("note") or "Sem observações.",
             "distance": f"{dist_km:.1f} km",
             "eta": f"{int(dist_km * 3 + 5)} min", # Simple mock ETA based on distance
@@ -1051,10 +1164,43 @@ class OperationalState(rx.State):
 
 
     def accept_request(self, request_id: int):
-        """Select a request and start local/mock attendance flow only after a real provider accepts."""
+        """Select a request, update status in Xano, and start attendance flow."""
+        # DIAGNOSTIC LOG: Check what ID is actually being passed to the function
+        logger.info("--- ACCEPT REQUEST ATTEMPT ---")
+        logger.info("Request ID received from frontend: %s", request_id)
+
         request = next((item for item in self.available_requests if item["id"] == request_id), None)
         if request is None:
-            return rx.toast("Solicitação não encontrada.")
+            logger.warning("Request ID %s not found in available_requests list", request_id)
+            return rx.toast("Solicitação não encontrada na lista local.")
+
+        token = self.auth_token or AuthState.auth_token
+        if not token:
+            logger.error("No auth token available for accept_request")
+            return AuthState.expire_session()
+
+        try:
+            logger.info("Attempting to update Xano status for ID %s to 'accepted'...", request_id)
+            update_service_request_status_xano(
+                auth_token=token,
+                api_url=get_xano_services_url(),
+                request_id=request_id,
+                status="accepted"
+            )
+            logger.info("Successfully updated status in Xano for ID %s", request_id)
+        except XanoAPIError as error:
+            logger.error("Xano API Error during accept_request: status=%s", error.status_code)
+            if error.status_code == 401:
+                return AuthState.expire_session()
+            if error.status_code == 404:
+                return rx.toast("Este chamado não está mais disponível.")
+            if error.status_code == 400:
+                return rx.toast("Os dados do chamado são inválidos.")
+            return rx.toast("Não foi possível aceitar o chamado. Tente novamente.")
+        except Exception as error:
+            logger.exception("Unexpected error accepting request %s: %s", request_id, error)
+            return rx.toast("Ocorreu um erro inesperado ao processar a aceitação.")
+
         self.selected_request = request
 
         # IMPORTANT: We use the selected_request data to populate the atendimento_mock
@@ -1066,6 +1212,7 @@ class OperationalState(rx.State):
         self.show_cancel_confirm = False
         self.available_requests = [item for item in self.available_requests if item["id"] != request_id]
 
+        logger.info("Request %s accepted and redirected to progress screen", request_id)
         return rx.redirect("/provider-service-progress")
 
     def refuse_request(self, request_id: int):
@@ -1146,12 +1293,32 @@ class OperationalState(rx.State):
         self.show_cancel_confirm = False
 
     def confirm_cancel_atendimento(self):
-        """Cancel attendance, clear mock and return to provider home."""
+        """Cancel attendance, revert status to pending in Xano, and return to provider home."""
+        request_id = self.atendimento_mock.get("id")
+        token = self.auth_token or AuthState.auth_token
+
+        if request_id and token:
+            try:
+                # Revert status to 'pending' so other providers can see it again
+                update_service_request_status_xano(
+                    auth_token=token,
+                    api_url=get_xano_services_url(),
+                    request_id=request_id,
+                    status="pending"
+                )
+            except Exception as error:
+                logger.error("Failed to revert request status to pending: %s", error)
+                # We continue with local cleanup even if API fails to avoid locking the UI,
+                # but in a production app we might want to warn the user.
+
         self.reset_atendimento()
         return rx.redirect("/home_provider")
 
     def advance_atendimento_phase(self):
         """Advance through mock attendance phases in strict sequence."""
+        request_id = self.atendimento_mock.get("id")
+        token = self.auth_token or AuthState.auth_token
+
         if self.atendimento_phase == "A_CAMINHO":
             self.atendimento_phase = "NO_LOCAL"
             return
@@ -1160,6 +1327,15 @@ class OperationalState(rx.State):
             return
         if self.atendimento_phase == "ATENDENDO":
             self.atendimento_phase = "CONCLUIDO"
+            if request_id and token:
+                try:
+                    complete_service_request_xano(
+                        auth_token=token,
+                        api_url=get_xano_services_url(),
+                        request_id=request_id,
+                    )
+                except Exception as error:
+                    logger.error("Failed to update status to completed: %s", error)
             return rx.redirect("/service-finalized")
 
     def finish_atendimento_and_back_home(self):
@@ -1235,14 +1411,149 @@ class OperationalState(rx.State):
 
         return sorted(nearby, key=lambda x: x["distance"])
 
-    def _haversine(self, lat1, lon1, lat2, lon2) -> float:
-        """Calculate the great circle distance between two points in km."""
-        R = 6371.0
-        phi1, phi2 = math.radians(lat1), math.radians(lat2)
-        dphi = math.radians(lat2 - lat1)
-        dlambda = math.radians(lon2 - lon1)
-        a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
-        return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    def notify_arrival(self):
+        """Notify the client that the provider has arrived at the location."""
+        request_id = self.atendimento_mock.get("id")
+        token = self.auth_token or AuthState.auth_token
+
+        if not request_id or not token:
+            return rx.toast("Erro: Dados de atendimento insuficientes.")
+
+        try:
+            send_service_message_xano(
+                auth_token=token,
+                api_url=get_xano_services_url(),
+                request_id=request_id,
+                message_text="Cheguei ao local!"
+            )
+            return rx.toast("Cliente notificado da sua chegada!")
+        except Exception as error:
+            logger.error("Failed to send arrival notification: %s", error)
+            return rx.toast("Erro ao enviar notificação. Tente novamente.")
+
+    def open_message_panel(self):
+        """Open the conversation panel and load the current messages."""
+        self.message_error = ""
+        self.show_message_panel = True
+        self.load_service_messages()
+
+    def close_message_panel(self):
+        self.show_message_panel = False
+        self.message_error = ""
+
+    def set_message_draft(self, value: str):
+        self.message_draft = value
+
+    def load_service_messages(self):
+        """Load the current service request conversation from Xano."""
+        request_id = self.atendimento_mock.get("id")
+        token = self.auth_token or AuthState.auth_token
+        if not request_id or not token:
+            self.message_error = "Não foi possível carregar as mensagens."
+            return
+
+        try:
+            self.service_messages = fetch_service_messages_xano(
+                auth_token=token,
+                api_url=get_xano_services_url(),
+                request_id=request_id,
+            )
+        except XanoAPIError as error:
+            logger.error("Failed to load service messages status=%s", error.status_code)
+            self.message_error = "Não foi possível carregar as mensagens."
+        except (requests.RequestException, ValueError):
+            logger.exception("Failed to load service messages")
+            self.message_error = "Não foi possível carregar as mensagens."
+
+    def send_message(self):
+        """Send the drafted message and append the created record locally."""
+        message_text = self.message_draft.strip()
+        request_id = self.atendimento_mock.get("id")
+        token = self.auth_token or AuthState.auth_token
+        if not message_text:
+            self.message_error = "Digite uma mensagem."
+            return
+        if not request_id or not token:
+            self.message_error = "Não foi possível enviar a mensagem."
+            return
+
+        try:
+            message = send_service_message_xano(
+                auth_token=token,
+                api_url=get_xano_services_url(),
+                request_id=request_id,
+                message_text=message_text,
+            )
+            self.service_messages = [*self.service_messages, message]
+            self.message_draft = ""
+            self.message_error = ""
+        except XanoAPIError as error:
+            logger.error("Failed to send service message status=%s", error.status_code)
+            self.message_error = "Não foi possível enviar a mensagem."
+        except requests.RequestException:
+            logger.exception("Failed to send service message")
+            self.message_error = "Não foi possível enviar a mensagem."
+
+    def open_client_message_panel(self):
+        """Open the client conversation for the active request."""
+        self.client_message_error = ""
+        self.show_client_message_panel = True
+        self.load_client_service_messages()
+
+    def close_client_message_panel(self):
+        self.show_client_message_panel = False
+        self.client_message_error = ""
+
+    def set_client_message_draft(self, value: str):
+        self.client_message_draft = value
+
+    def load_client_service_messages(self):
+        """Load messages for the client's active request."""
+        token = self.auth_token or AuthState.auth_token
+        if self.request_id is None or not token:
+            self.client_message_error = "Não foi possível carregar as mensagens."
+            return
+
+        try:
+            self.service_messages = fetch_service_messages_xano(
+                auth_token=token,
+                api_url=get_xano_services_url(),
+                request_id=self.request_id,
+            )
+        except XanoAPIError as error:
+            logger.error("Failed to load client messages status=%s", error.status_code)
+            self.client_message_error = "Não foi possível carregar as mensagens."
+        except (requests.RequestException, ValueError):
+            logger.exception("Failed to load client messages")
+            self.client_message_error = "Não foi possível carregar as mensagens."
+
+    def send_client_message(self):
+        """Send a message from the client for the active request."""
+        message_text = self.client_message_draft.strip()
+        token = self.auth_token or AuthState.auth_token
+        if not message_text:
+            self.client_message_error = "Digite uma mensagem."
+            return
+        if self.request_id is None or not token:
+            self.client_message_error = "Não foi possível enviar a mensagem."
+            return
+
+        try:
+            message = send_service_message_xano(
+                auth_token=token,
+                api_url=get_xano_services_url(),
+                request_id=self.request_id,
+                message_text=message_text,
+            )
+            self.service_messages = [*self.service_messages, message]
+            self.client_message_draft = ""
+            self.client_message_error = ""
+        except XanoAPIError as error:
+            logger.error("Failed to send client message status=%s", error.status_code)
+            self.client_message_error = "Não foi possível enviar a mensagem."
+        except requests.RequestException:
+            logger.exception("Failed to send client message")
+            self.client_message_error = "Não foi possível enviar a mensagem."
 
     @rx.event(background=True)
     async def cleanup_stale_providers(self):
@@ -2145,6 +2456,15 @@ def customer_dashboard() -> rx.Component:
                     width="100%",
                 ),
             ),
+            rx.cond(
+                OperationalState.request_id != None,
+                rx.button(
+                    rx.hstack(rx.text("💬"), rx.text("Mensagens do chamado"), spacing="2"),
+                    on_click=OperationalState.open_client_message_panel,
+                    class_name="secondary-button",
+                    width="100%",
+                ),
+            ),
             width="100%",
             padding="1rem",
             background="rgba(255,255,255,0.8)",
@@ -2159,6 +2479,7 @@ def customer_dashboard() -> rx.Component:
             box_shadow="0 -10px 30px rgba(0,0,0,0.1)",
             pointer_events="auto",
         ),
+        client_message_panel(),
         rx.box(
             width="100%",
             height="100vh",
@@ -3226,7 +3547,14 @@ def provider_service_progress_screen() -> rx.Component:
                         # Button to notify arrival (Sends message/updates status)
                         rx.button(
                             rx.hstack(rx.text("💬"), rx.text("Avisar Chegada"), spacing="2"),
-                            on_click=rx.toast("Cliente notificado da sua chegada!"),
+                            on_click=OperationalState.notify_arrival,
+                            class_name="secondary-button",
+                            size="2",
+                            padding_x="1rem",
+                        ),
+                        rx.button(
+                            rx.hstack(rx.text("💬"), rx.text("Mensagens"), spacing="2"),
+                            on_click=OperationalState.open_message_panel,
                             class_name="secondary-button",
                             size="2",
                             padding_x="1rem",
@@ -3273,6 +3601,7 @@ def provider_service_progress_screen() -> rx.Component:
             z_index="120",
             padding_x="1rem",
         ),
+        service_message_panel(),
         # Cancel Confirmation Modal
         rx.cond(
             OperationalState.show_cancel_confirm,
@@ -3289,6 +3618,7 @@ def provider_service_progress_screen() -> rx.Component:
                                 width="100%",
                             ),
                             rx.button(
+
                                 "Sim, cancelar",
                                 on_click=OperationalState.confirm_cancel_atendimento,
                                 class_name="primary-button",
@@ -3322,6 +3652,200 @@ def provider_service_progress_screen() -> rx.Component:
         position="relative",
         overflow="hidden",
         background=COLORS["background"],
+    )
+
+
+def service_message_panel() -> rx.Component:
+    """Render the conversation overlay for the active service request."""
+    return rx.cond(
+        OperationalState.show_message_panel,
+        rx.box(
+            rx.box(
+                rx.vstack(
+                    rx.hstack(
+                        rx.heading("Mensagens", size="5", color=COLORS["navy"]),
+                        rx.spacer(),
+                        rx.button(
+                            "×",
+                            on_click=OperationalState.close_message_panel,
+                            class_name="secondary-button",
+                            size="1",
+                            aria_label="Fechar mensagens",
+                        ),
+                        width="100%",
+                        align="center",
+                    ),
+                    rx.box(
+                        rx.cond(
+                            OperationalState.service_messages,
+                            rx.vstack(
+                                rx.foreach(
+                                    OperationalState.service_messages,
+                                    lambda message: rx.box(
+                                        rx.text(message["message_text"], color=COLORS["text"]),
+                                        rx.text(
+                                            f"Remetente #{message['sender_id']}",
+                                            color=COLORS["muted"],
+                                            font_size="0.75rem",
+                                        ),
+                                        padding="0.75rem",
+                                        border_radius="12px",
+                                        background="#F8FAFC",
+                                        width="100%",
+                                    ),
+                                ),
+                                spacing="2",
+                                width="100%",
+                            ),
+                            rx.center(
+                                rx.text("Nenhuma mensagem ainda.", color=COLORS["muted"]),
+                                min_height="5rem",
+                                width="100%",
+                            ),
+                        ),
+                        max_height="14rem",
+                        overflow_y="auto",
+                        width="100%",
+                        padding="0.25rem",
+                    ),
+                    rx.cond(
+                        OperationalState.message_error != "",
+                        rx.text(OperationalState.message_error, class_name="error-message"),
+                        rx.text(" ", height="1.2rem"),
+                    ),
+                    rx.hstack(
+                        rx.input(
+                            placeholder="Escreva uma mensagem...",
+                            value=OperationalState.message_draft,
+                            on_change=OperationalState.set_message_draft,
+                            class_name="profile-input",
+                            width="100%",
+                        ),
+                        rx.button(
+                            "Enviar",
+                            on_click=OperationalState.send_message,
+                            class_name="primary-button",
+                            size="2",
+                        ),
+                        width="100%",
+                        align="center",
+                        spacing="2",
+                    ),
+                    spacing="3",
+                    width="100%",
+                ),
+                width="min(100%, 34rem)",
+                background="white",
+                border_radius="16px",
+                padding="1.2rem",
+                box_shadow="0 20px 50px rgba(0,0,0,0.25)",
+            ),
+            position="fixed",
+            inset="0",
+            z_index="140",
+            display="flex",
+            align_items="center",
+            justify_content="center",
+            background="rgba(2,6,23,0.5)",
+            padding="1rem",
+        ),
+    )
+
+
+def client_message_panel() -> rx.Component:
+    """Render the client-side conversation overlay for the active request."""
+    return rx.cond(
+        OperationalState.show_client_message_panel,
+        rx.box(
+            rx.box(
+                rx.vstack(
+                    rx.hstack(
+                        rx.heading("Mensagens do chamado", size="5", color=COLORS["navy"]),
+                        rx.spacer(),
+                        rx.button(
+                            "×",
+                            on_click=OperationalState.close_client_message_panel,
+                            class_name="secondary-button",
+                            size="1",
+                            aria_label="Fechar mensagens",
+                        ),
+                        width="100%",
+                        align="center",
+                    ),
+                    rx.box(
+                        rx.cond(
+                            OperationalState.service_messages,
+                            rx.vstack(
+                                rx.foreach(
+                                    OperationalState.service_messages,
+                                    lambda message: rx.box(
+                                        rx.text(message["message_text"], color=COLORS["text"]),
+                                        rx.text(
+                                            f"Remetente #{message['sender_id']}",
+                                            color=COLORS["muted"],
+                                            font_size="0.75rem",
+                                        ),
+                                        padding="0.75rem",
+                                        border_radius="12px",
+                                        background="#F8FAFC",
+                                        width="100%",
+                                    ),
+                                ),
+                                spacing="2",
+                                width="100%",
+                            ),
+                            rx.center(
+                                rx.text("Nenhuma mensagem ainda.", color=COLORS["muted"]),
+                                min_height="5rem",
+                                width="100%",
+                            ),
+                        ),
+                        max_height="14rem",
+                        overflow_y="auto",
+                        width="100%",
+                        padding="0.25rem",
+                    ),
+                    rx.cond(
+                        OperationalState.client_message_error != "",
+                        rx.text(OperationalState.client_message_error, class_name="error-message"),
+                        rx.text(" ", height="1.2rem"),
+                    ),
+                    rx.hstack(
+                        rx.input(
+                            placeholder="Escreva uma mensagem...",
+                            value=OperationalState.client_message_draft,
+                            on_change=OperationalState.set_client_message_draft,
+                            class_name="profile-input",
+                            width="100%",
+                        ),
+                        rx.button(
+                            "Enviar",
+                            on_click=OperationalState.send_client_message,
+                            class_name="primary-button",
+                            size="2",
+                        ),
+                        width="100%",
+                        align="center",
+                        spacing="2",
+                    ),
+                    spacing="3",
+                    width="100%",
+                ),
+                width="min(100%, 34rem)",
+                background="white",
+                border_radius="16px",
+                padding="1.2rem",
+                box_shadow="0 20px 50px rgba(0,0,0,0.25)",
+            ),
+            position="fixed",
+            inset="0",
+            z_index="140",
+            display="flex",
+            align_items="center",
+            justify_content="center",
+            background="rgba(2,6,23,0.5)",
+            padding="1rem",
+        ),
     )
 
 
@@ -3480,7 +4004,7 @@ app = rx.App(
             }
         };
 
-        window.showSOSRoute = function(mapId, startCoords, endCoords) {
+        window.showSOSRoute = async function(mapId, startCoords, endCoords) {
             const map = window.sosMaps[mapId];
             if (!map) return;
 
@@ -3499,11 +4023,31 @@ app = rx.App(
                 icon: L.divIcon({ className: "user-marker", html: "🔵" })
             }).addTo(map).bindPopup("Usuário socorrido");
 
-            window.sosRouteLine = L.polyline([start, end], {
-                color: "#F97316",
-                weight: 5,
-                opacity: 0.85,
-            }).addTo(map);
+            try {
+                // Fetch real road geometry from OSRM
+                const url = `https://router.project-osrm.org/route/v1/driving/${startCoords[1]},${startCoords[0]};${endCoords[1]},${endCoords[0]}?overview=full&geometries=geojson`;
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+                    const coords = data.routes[0].geometry.coordinates.map(coord => [coord[1], coord[0]]);
+                    window.sosRouteLine = L.polyline(coords, {
+                        color: "#F97316",
+                        weight: 5,
+                        opacity: 0.85,
+                    }).addTo(map);
+                } else {
+                    throw new Error("Route not found");
+                }
+            } catch (e) {
+                console.error("Routing error, falling back to straight line:", e);
+                window.sosRouteLine = L.polyline([start, end], {
+                    color: "#F97316",
+                    weight: 5,
+                    opacity: 0.85,
+                    dashArray: '5, 10'
+                }).addTo(map);
+            }
 
             map.fitBounds(window.sosRouteLine.getBounds(), { padding: [40, 40] });
         };
