@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import base64
+import binascii
+from urllib.parse import urlsplit
 from collections.abc import Callable
 
 from styles import GLOBAL_STYLE, COLORS
@@ -19,6 +21,7 @@ from styles import GLOBAL_STYLE, COLORS
 
 logger = logging.getLogger(__name__)
 pending_provider_requests: list[dict] = [] # Deprecated: Use Xano polling
+LOGIN_BACKGROUND_VIDEO_URL = "/Pippit_0924_TruckTracking.mp4"
 
 
 def validate_signup(name: str, email: str, password: str) -> str:
@@ -29,18 +32,22 @@ def validate_signup(name: str, email: str, password: str) -> str:
 
 
 def digits_only(value: str) -> str:
-    return "".join(character for character in value if character.isdigit())
+    return "".join(character for character in str(value or "") if character.isdigit())
 
 
 def build_image_data_url(file_name: str, content: bytes) -> str:
     """Convert a selected profile image into a base64 data URL supported by the frontend."""
-    lower_name = (file_name or "profile-image").lower()
-    if lower_name.endswith(".jpg") or lower_name.endswith(".jpeg"):
+    extension = file_name.lower().rsplit(".", 1)[-1] if "." in file_name else ""
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime_type = "image/png"
+        if extension and extension != "png":
+            raise ValueError("Selecione uma imagem PNG ou JPEG válida.")
+    elif content.startswith(b"\xff\xd8\xff"):
         mime_type = "image/jpeg"
-    elif lower_name.endswith(".png"):
-        mime_type = "image/png"
+        if extension and extension not in {"jpg", "jpeg"}:
+            raise ValueError("Selecione uma imagem PNG ou JPEG válida.")
     else:
-        mime_type = "image/png"
+        raise ValueError("Selecione uma imagem PNG ou JPEG válida.")
     encoded = base64.b64encode(content).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
 
@@ -69,6 +76,10 @@ def format_phone(value: str) -> str:
 
 class InvalidCredentialsError(Exception):
     """Raised when Xano rejects authentication credentials."""
+
+    def __init__(self, message: str = ""):
+        super().__init__(message)
+        self.message = message
 
 
 class SignupConflictError(Exception):
@@ -109,6 +120,28 @@ def _response_message(response: requests.Response) -> str:
     return str(body)
 
 
+def _safe_login_error_message(response_body: object) -> str:
+    """Return a short, user-facing Xano login error without exposing response data."""
+    if not isinstance(response_body, dict):
+        return ""
+    for key in ("message", "error"):
+        message = response_body.get(key)
+        if isinstance(message, str):
+            message = message.strip()
+            if message and len(message) <= 240:
+                return message
+    return ""
+
+
+def _validate_xano_api_url(api_url: str) -> str:
+    """Return a normalized HTTP(S) Xano API base URL."""
+    normalized_url = api_url.strip().rstrip("/")
+    parsed_url = urlsplit(normalized_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise RuntimeError("XANO_API_URL must be a valid HTTP(S) URL")
+    return normalized_url
+
+
 def _is_duplicate_email_error(status_code: int, message: str) -> bool:
     normalized_message = message.lower()
     duplicate_markers = (
@@ -132,53 +165,55 @@ def _safe_log_payload(payload: dict) -> dict:
 
 def _auth_headers(auth_token: str) -> dict[str, str]:
     """Build the only authenticated Xano request header used by the client."""
-    return {"Authorization": f"Bearer {auth_token}"}
+    if not auth_token:
+        raise ValueError("Authentication token is required")
+    return {"Authorization": "Bearer " + auth_token}
 
 
 def authenticate_with_xano(path: str, payload: dict, api_url: str) -> tuple[str, int]:
     """Call an Xano auth endpoint and return its token and user ID."""
-    normalized_url = api_url.strip().rstrip("/")
-    if not normalized_url:
-        raise RuntimeError("XANO_API_URL is not configured")
-
+    normalized_url = _validate_xano_api_url(api_url)
     endpoint = f"{normalized_url}{path}"
-    logger.warning("Xano request: POST %s payload=%s", endpoint, _safe_log_payload(payload))
-    response = requests.post(endpoint, json=payload, timeout=10)
-    message = _response_message(response) if response.status_code >= 400 else ""
+    logger.warning("Xano request: POST %s", endpoint)
+    response = requests.post(
+        endpoint,
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        timeout=10,
+    )
     try:
         response_body = response.json()
     except ValueError:
-        response_body = response.text.strip()
-    safe_response_body = (
-        _safe_log_payload(response_body)
-        if isinstance(response_body, dict)
-        else response_body
-    )
-    logger.warning(
-        "Xano response: POST %s status=%s body=%s",
-        endpoint,
-        response.status_code,
-        safe_response_body,
-    )
+        response_body = None
+    logger.warning("Xano response: POST %s status=%s", endpoint, response.status_code)
 
     if response.status_code >= 400:
+        message = (
+            _safe_login_error_message(response_body)
+            if path == "/auth/login"
+            else _response_message(response)
+        )
         if path == "/auth/signup" and _is_duplicate_email_error(response.status_code, message):
             raise SignupConflictError()
-        if path == "/auth/login" and response.status_code in {401, 403}:
-            raise InvalidCredentialsError()
-        raise XanoAPIError(response.status_code, message)
+        if path == "/auth/login" and response.status_code in {400, 401, 403}:
+            raise InvalidCredentialsError(message)
+        raise XanoAPIError(response.status_code, message if path != "/auth/login" else "")
 
-    try:
-        response_payload = response.json()
-    except ValueError as error:
-        raise XanoAPIError(response.status_code, "Xano returned invalid JSON") from error
+    response_payload = response_body
     if not isinstance(response_payload, dict):
         raise XanoAPIError(response.status_code, "Xano returned an invalid authentication response")
-    auth_token = response_payload.get("authToken")
-    user_id = response_payload.get("user_id")
-    if not auth_token or not isinstance(user_id, int):
+    auth_token = response_payload.get("authToken") or response_payload.get("token")
+    user = response_payload.get("user")
+    response_user_id = response_payload.get("user_id") or response_payload.get("id")
+    if response_user_id is None and isinstance(user, dict):
+        response_user_id = user.get("user_id") or user.get("id")
+    try:
+        user_id = int(response_user_id)
+    except (TypeError, ValueError):
+        user_id = 0
+    if not isinstance(auth_token, str) or not auth_token.strip() or user_id <= 0:
         raise XanoAPIError(response.status_code, "Xano returned an invalid authentication response")
-    return auth_token, user_id
+    return auth_token.strip(), user_id
 
 
 def login_with_xano(email: str, password: str, api_url: str) -> tuple[str, int]:
@@ -188,6 +223,36 @@ def login_with_xano(email: str, password: str, api_url: str) -> tuple[str, int]:
         {"email": email.strip().lower(), "password": password},
         api_url,
     )
+
+
+def fetch_authenticated_user(auth_token: str, api_url: str, user_id: str = "") -> dict:
+    """Fetch and validate the user associated with an authentication token."""
+    current_user_id = int(user_id) if user_id and str(user_id).strip() else None
+    endpoint = f"{_validate_xano_api_url(api_url)}/auth/me"
+    logger.warning(
+        "Xano request: GET %s user_id=%s auth_token=<redacted>",
+        endpoint,
+        current_user_id,
+    )
+    response = requests.get(
+        endpoint,
+        headers=_auth_headers(auth_token),
+        timeout=10,
+    )
+    logger.warning(
+        "Xano response: GET %s status=%s body=%s",
+        endpoint,
+        response.status_code,
+        _safe_log_payload(response.json()) if response.content else "",
+    )
+    response.raise_for_status()
+    user = response.json()
+    if not isinstance(user, dict):
+        raise ValueError("Unexpected current user response")
+    response_user_id = user.get("id") or user.get("user_id")
+    if current_user_id is not None and response_user_id is not None and int(response_user_id) != current_user_id:
+        raise ValueError("Current user does not match authenticated user")
+    return user
 
 
 def signup_with_xano(
@@ -233,29 +298,25 @@ def save_user_profile(
     api_url: str,
     payload: dict,
     method: str,
-    profile_file: dict | None = None,
 ) -> dict:
     """Create or update the profile owned by the current Xano token."""
-    headers = _auth_headers(auth_token)
+    headers = {
+        **_auth_headers(auth_token),
+        "Content-Type": "application/json",
+    }
     request_kwargs = {"headers": headers, "timeout": 10}
+    text_payload = {
+        "nome_completo": str(payload.get("nome_completo") or "").strip(),
+        "cpf": digits_only(payload.get("cpf")),
+        "telefone": digits_only(payload.get("telefone")),
+        "foto_perfil": (
+            payload["foto_perfil"].strip()
+            if isinstance(payload.get("foto_perfil"), str)
+            else ""
+        ),
+    }
 
-    if profile_file:
-        form_data = {
-            "nome_completo": payload.get("nome_completo"),
-            "cpf": payload.get("cpf"),
-            "telefone": payload.get("telefone"),
-        }
-        files = {
-            profile_file.get("field_name", "foto_perfil"): (
-                profile_file.get("name", "profile-image"),
-                profile_file.get("content", b""),
-                profile_file.get("mime_type", "image/png"),
-            )
-        }
-        request_kwargs["files"] = files
-        request_kwargs["data"] = form_data
-    else:
-        request_kwargs["json"] = payload
+    request_kwargs["json"] = text_payload
 
     response = requests.request(
         method,
@@ -268,6 +329,36 @@ def save_user_profile(
     if not isinstance(result, dict):
         raise ValueError("Unexpected profile response")
     return result
+
+
+def upload_user_profile_photo(
+    auth_token: str,
+    api_url: str,
+    profile_file: dict,
+) -> str:
+    """Upload a profile image and return its stable public URL."""
+    parsed_api_url = urlsplit(_validate_xano_api_url(api_url))
+    response = requests.post(
+        f"{api_url.rstrip('/')}/user_profile/photo",
+        headers=_auth_headers(auth_token),
+        files={
+            profile_file.get("field_name", "foto_perfil"): (
+                profile_file.get("name", "profile-image"),
+                profile_file.get("content", b""),
+                profile_file.get("mime_type", "image/png"),
+            )
+        },
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        raise XanoAPIError(response.status_code, _response_message(response))
+    result = response.json()
+    if not isinstance(result, dict):
+        raise XanoAPIError(response.status_code, "Xano returned an invalid upload response")
+    path = result.get("path")
+    if not isinstance(path, str) or not path.startswith("/vault/"):
+        raise XanoAPIError(response.status_code, "Xano returned an invalid upload path")
+    return f"{parsed_api_url.scheme}://{parsed_api_url.netloc}{path}"
 
 
 def get_xano_services_url() -> str:
@@ -465,10 +556,10 @@ class AuthState(rx.State):
     signup_email: str = ""
     signup_password: str = ""
     signup_role: str = "cliente"
-    auth_token: str = rx.LocalStorage(name="sos_auth_token", sync=True)
-    user_json: str = rx.LocalStorage(name="sos_auth_user", sync=True)
+    auth_token: str = ""
+    user_json: str = ""
     user: dict = {}
-    user_id: str = rx.LocalStorage(name="sos_auth_user_id", sync=True)
+    user_id: str = ""
     error_message: str = ""
     signup_message: str = ""
     is_loading: bool = False
@@ -478,6 +569,8 @@ class AuthState(rx.State):
     # Profile Fields (Mock)
     user_profile_photo: str = ""
     selected_profile_image: str = ""
+    selected_profile_filename: str = ""
+    selected_profile_uploaded_url: str = ""
     user_full_name: str = "Usuário SOS"
     user_email: str = "usuario@exemplo.com"
     user_phone: str = "(11) 99999-9999"
@@ -501,6 +594,11 @@ class AuthState(rx.State):
         first = names[0][0].upper()
         last = names[-1][0].upper() if len(names) > 1 else ""
         return f"{first}{last}"
+
+    @rx.var
+    def profile_photo_preview(self) -> str:
+        """Return the staged profile image before the persisted photo."""
+        return self.selected_profile_image or self.user_profile_photo
 
     def open_signup(self) -> None:
         return rx.redirect("/signup")
@@ -597,15 +695,13 @@ class AuthState(rx.State):
         return rx.redirect("/login")
 
     def get_xano_api_url(self) -> str:
-        configured_url = os.getenv("XANO_API_URL", "").strip().rstrip("/")
-        if configured_url:
-            return configured_url
-
-        return ""
+        configured_url = os.getenv("XANO_API_URL", "")
+        if not configured_url.strip():
+            return ""
+        return configured_url.strip().rstrip("/")
 
     def set_authenticated_user(self, auth_token: str, user: dict) -> None:
         self.auth_token = auth_token
-        OperationalState.auth_token = auth_token
         self.session_validated = True
         self.user = user
         self.user_json = json.dumps(user)
@@ -616,19 +712,19 @@ class AuthState(rx.State):
 
     def clear_session(self) -> None:
         self.auth_token = ""
-        OperationalState.auth_token = ""
         self.user_json = ""
         self.user = {}
         self.user_id = ""
         self.user_role = "cliente"
         self.user_profile_photo = ""
         self.selected_profile_image = ""
+        self.selected_profile_filename = ""
+        self.selected_profile_uploaded_url = ""
         self.user_full_name = "Usuário SOS"
         self.user_email = "usuario@exemplo.com"
         self.user_phone = "(11) 99999-9999"
         self.user_cpf = ""
         self.profile_exists = False
-        OperationalState.user_vehicles = []
 
     def expire_session(self):
         """Clear all authenticated state and return to login."""
@@ -642,34 +738,8 @@ class AuthState(rx.State):
         if not self.auth_token:
             raise RuntimeError("Authentication session is incomplete")
 
-        current_user_id = None
-        if self.user_id and str(self.user_id).strip():
-            current_user_id = int(self.user_id)
-
-        endpoint = f"{self.get_xano_api_url()}/auth/me"
-        logger.warning(
-            "Xano request: GET %s user_id=%s auth_token=<redacted>",
-            endpoint,
-            current_user_id,
-        )
-        response = requests.get(
-            endpoint,
-            headers=_auth_headers(self.auth_token),
-            timeout=10,
-        )
-        logger.warning(
-            "Xano response: GET %s status=%s body=%s",
-            endpoint,
-            response.status_code,
-            _safe_log_payload(response.json()) if response.content else "",
-        )
-        response.raise_for_status()
-        user = response.json()
-        if not isinstance(user, dict):
-            raise ValueError("Unexpected current user response")
+        user = fetch_authenticated_user(self.auth_token, self.get_xano_api_url(), self.user_id)
         response_user_id = user.get("id") or user.get("user_id")
-        if current_user_id is not None and response_user_id is not None and int(response_user_id) != current_user_id:
-            raise ValueError("Current user does not match authenticated user")
         if response_user_id is not None:
             self.user_id = str(response_user_id)
         self.set_authenticated_user(self.auth_token, user)
@@ -678,6 +748,13 @@ class AuthState(rx.State):
         if self.user_role == "prestador":
             return rx.redirect("/home_provider")
         return rx.redirect("/home_client")
+
+    def redirect_to_user_profile(self):
+        if self.user_role == "prestador":
+            return rx.redirect("/perfil-prestador")
+        if self.user_role == "cliente":
+            return rx.redirect("/perfil-cliente")
+        raise UnsupportedRoleError()
 
     def restore_session(self):
         """Restore the persisted user and validate the token with Xano."""
@@ -697,44 +774,67 @@ class AuthState(rx.State):
                 if self.user.get("role"):
                     self.user_role = normalize_user_role(self.user.get("role"))
 
-            # Crucial: Set the token in OperationalState as well before loading
-            OperationalState.auth_token = self.auth_token
-
             self.load_current_user()
             self.session_validated = True
         except (requests.RequestException, RuntimeError, ValueError, UnsupportedRoleError) as e:
             logger.error("Session restoration failed: %s", e)
             return self.expire_session()
 
-    def login(self) -> None:
+    @rx.event
+    async def login(self):
         """Authenticate through Xano without retaining the submitted password."""
+        if self.is_loading:
+            return
         self.error_message = ""
         self.is_loading = True
-        api_url = self.get_xano_api_url()
-        if not api_url:
-            self.error_message = "Não foi possível conectar ao Xano. Tente novamente."
-            self.password = ""
-            self.is_loading = False
-            return
+        connection_error = (
+            "Erro ao conectar com o servidor Xano. "
+            "Verifique a URL do endpoint ou sua conexão com a internet."
+        )
 
+        yield
+        redirect_event = None
         try:
-            auth_token, user_id = login_with_xano(self.email, self.password, api_url)
+            api_url = self.get_xano_api_url()
+            if not api_url:
+                raise RuntimeError("XANO_API_URL is not configured")
+            auth_token, user_id = await asyncio.to_thread(
+                login_with_xano,
+                self.email,
+                self.password,
+                api_url,
+            )
+            user = await asyncio.to_thread(
+                fetch_authenticated_user,
+                auth_token,
+                api_url,
+                str(user_id),
+            )
             self.auth_token = auth_token
             self.user_id = str(user_id)
-            self.load_current_user()
-            return self.redirect_to_user_home()
+            self.set_authenticated_user(auth_token, user)
+            redirect_event = self.redirect_to_user_profile()
         except UnsupportedRoleError:
+            self.clear_session()
             self.error_message = "Sua conta não possui um tipo de usuário válido."
-        except InvalidCredentialsError:
-            self.error_message = "E-mail ou senha inválidos."
+        except InvalidCredentialsError as error:
+            self.clear_session()
+            self.error_message = error.message or "E-mail ou senha incorretos."
         except XanoAPIError as error:
-            self.error_message = error.message or "Não foi possível conectar ao Xano. Tente novamente."
+            self.clear_session()
+            if error.status_code in {400, 401, 403}:
+                self.error_message = error.message or "E-mail ou senha incorretos."
+            else:
+                self.error_message = connection_error
         except (requests.RequestException, RuntimeError, ValueError) as error:
-            logger.exception("Xano login request failed: %s", error)
-            self.error_message = "Não foi possível conectar ao Xano. Tente novamente."
+            self.clear_session()
+            logger.warning("Xano login failed: %s", type(error).__name__)
+            self.error_message = connection_error
         finally:
             self.password = ""
             self.is_loading = False
+        if redirect_event is not None:
+            yield redirect_event
 
     def set_user_full_name(self, value: str) -> None:
         self.user_full_name = value
@@ -767,7 +867,7 @@ class AuthState(rx.State):
             self.user_cpf = format_cpf(profile.get("cpf", ""))
             self.user_phone = format_phone(profile.get("telefone", ""))
             self.user_profile_photo = profile.get("foto_perfil") or self.user_profile_photo
-            self.selected_profile_image = self.user_profile_photo
+            self.selected_profile_uploaded_url = ""
         except requests.HTTPError as error:
             if error.response is not None and error.response.status_code == 401:
                 return self.expire_session()
@@ -779,11 +879,14 @@ class AuthState(rx.State):
 
     def save_profile(self) -> None:
         """Create or update only the profile owned by the current token."""
+        if self.profile_is_loading:
+            return
         self.profile_error = ""
         self.profile_message = ""
+        full_name = str(self.user_full_name or "").strip()
         cpf = digits_only(self.user_cpf)
         phone = digits_only(self.user_phone)
-        if self.user_full_name.strip() == "":
+        if full_name == "":
             self.profile_error = "Informe seu nome completo."
             return
         if cpf and len(cpf) != 11:
@@ -800,39 +903,65 @@ class AuthState(rx.State):
             self.profile_error = "O perfil ainda não está configurado neste ambiente."
             return
         self.profile_is_loading = True
-        photo_value = self.selected_profile_image or self.user_profile_photo
-        payload = {
-            "nome_completo": self.user_full_name.strip(),
-            "cpf": cpf,
-            "telefone": phone,
-            "foto_perfil": photo_value.strip() if isinstance(photo_value, str) else None,
-        }
         profile_file = None
-        if self.selected_profile_image and self.selected_profile_image.startswith("data:image/"):
-            encoded = self.selected_profile_image.split(",", 1)[1]
-            file_content = base64.b64decode(encoded)
-            file_name = f"profile-{self.user_id or 'user'}.png"
+        if self.selected_profile_image and not self.selected_profile_uploaded_url:
+            try:
+                metadata, encoded = self.selected_profile_image.split(",", 1)
+                mime_type = metadata.removeprefix("data:").removesuffix(";base64")
+                if mime_type not in {"image/jpeg", "image/png"}:
+                    raise ValueError("Unsupported profile image type")
+                file_content = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                self.profile_is_loading = False
+                self.profile_error = "Não foi possível carregar a imagem selecionada."
+                return
+
+            extension = ".jpg" if mime_type == "image/jpeg" else ".png"
+            file_name = (self.selected_profile_filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+            if not file_name:
+                file_name = f"profile-{self.user_id or 'user'}{extension}"
+            elif not file_name.lower().endswith(extension):
+                file_name = f"{file_name.rsplit('.', 1)[0]}{extension}"
             profile_file = {
                 "field_name": "foto_perfil",
                 "name": file_name,
                 "content": file_content,
-                "mime_type": "image/png",
+                "mime_type": mime_type,
             }
 
         try:
+            if profile_file:
+                self.selected_profile_uploaded_url = upload_user_profile_photo(
+                    self.auth_token,
+                    api_url,
+                    profile_file,
+                )
+
+            photo_value = (
+                self.selected_profile_uploaded_url
+                if self.selected_profile_image
+                else str(self.user_profile_photo or "").strip()
+            )
+            payload = {
+                "nome_completo": full_name,
+                "cpf": cpf,
+                "telefone": phone,
+                "foto_perfil": photo_value,
+            }
             profile = save_user_profile(
                 self.auth_token,
                 api_url,
                 payload,
                 "PUT" if self.profile_exists else "POST",
-                profile_file=profile_file,
             )
             self.profile_exists = True
-            self.user_full_name = profile.get("nome_completo") or self.user_full_name
-            self.user_cpf = format_cpf(profile.get("cpf", cpf))
-            self.user_phone = format_phone(profile.get("telefone", phone))
+            self.user_full_name = str(profile.get("nome_completo") or full_name)
+            self.user_cpf = format_cpf(str(profile.get("cpf") or cpf))
+            self.user_phone = format_phone(str(profile.get("telefone") or phone))
             self.user_profile_photo = profile.get("foto_perfil") or photo_value or self.user_profile_photo
-            self.selected_profile_image = self.user_profile_photo
+            self.selected_profile_image = ""
+            self.selected_profile_filename = ""
+            self.selected_profile_uploaded_url = ""
             self.profile_message = "Dados atualizados com sucesso."
         except XanoAPIError as error:
             if error.status_code == 401:
@@ -845,7 +974,7 @@ class AuthState(rx.State):
         finally:
             self.profile_is_loading = False
 
-    def handle_profile_upload(self, files: list[rx.UploadFile] | None = None):
+    def handle_profile_upload(self, files: list[rx.UploadFile]):
         """Store a local image preview and keep it ready for the profile save payload."""
         if not files:
             return
@@ -858,12 +987,16 @@ class AuthState(rx.State):
         try:
             file_like.seek(0)
             contents = file_like.read()
+            if not isinstance(contents, bytes) or not contents:
+                raise ValueError("The selected file is empty or unreadable")
             file_name = getattr(uploaded_file, "name", None) or "profile-image"
+            file_name = file_name.replace("\\", "/").rsplit("/", 1)[-1]
             data_url = build_image_data_url(file_name, contents)
             self.selected_profile_image = data_url
-            self.user_profile_photo = data_url
+            self.selected_profile_filename = file_name
+            self.selected_profile_uploaded_url = ""
             self.profile_error = ""
-        except Exception:
+        except (OSError, ValueError):
             self.profile_error = "Não foi possível carregar a imagem selecionada."
 
 
@@ -909,7 +1042,6 @@ class OperationalState(rx.State):
 
 
     # Customer Request state
-    auth_token: str = rx.LocalStorage(name="sos_auth_token", sync=True)
     selected_service: str | None = None
     request_status: str = "idle" # idle, searching, matched
     selected_vehicle_id: int | None = None
@@ -937,6 +1069,10 @@ class OperationalState(rx.State):
     v_plate: str = ""
     v_year: int = 2024
     v_color: str = ""
+
+    async def _get_auth_token(self) -> str:
+        auth_state = await self.get_state(AuthState)
+        return auth_state.auth_token
 
     @rx.var
     def vehicle_options(self) -> list[str]:
@@ -1022,12 +1158,12 @@ class OperationalState(rx.State):
         self.show_vehicle_modal = False
         self.editing_vehicle_id = None
 
-    def save_vehicle(self):
+    async def save_vehicle(self):
         """Save a vehicle through Xano and refresh the profile list."""
         if not self.v_plate or not self.v_brand or not self.v_model:
             return rx.toast("Preencha marca, modelo e placa.")
 
-        token = self.auth_token
+        token = await self._get_auth_token()
         if not isinstance(token, str) or not token.strip():
             return AuthState.expire_session()
 
@@ -1048,7 +1184,7 @@ class OperationalState(rx.State):
             )
             if response.status_code >= 400:
                 raise XanoAPIError(response.status_code, _response_message(response))
-            self.load_user_vehicles()
+            await self.load_user_vehicles()
             self.close_vehicle_modal()
             return rx.toast("Veículo cadastrado com sucesso!")
         except XanoAPIError as error:
@@ -1060,9 +1196,9 @@ class OperationalState(rx.State):
             logger.exception("Failed to save vehicle: %s", error)
             return rx.toast("Não foi possível salvar o veículo. Tente novamente.")
 
-    def load_user_vehicles(self):
+    async def load_user_vehicles(self):
         """Load the authenticated user's vehicles without blocking the profile."""
-        token = self.auth_token
+        token = await self._get_auth_token()
         if not isinstance(token, str) or not token.strip():
             self.user_vehicles = []
             return
@@ -1141,7 +1277,7 @@ class OperationalState(rx.State):
         """Background task that fetches real pending requests from Xano every 20 seconds."""
         while True:
             async with self:
-                token = self.auth_token or AuthState.auth_token
+                token = await self._get_auth_token()
                 if not token:
                     logger.warning("Polling skipped: No auth token available")
                     await asyncio.sleep(10)
@@ -1163,7 +1299,7 @@ class OperationalState(rx.State):
         pass
 
 
-    def accept_request(self, request_id: int):
+    async def accept_request(self, request_id: int):
         """Select a request, update status in Xano, and start attendance flow."""
         # DIAGNOSTIC LOG: Check what ID is actually being passed to the function
         logger.info("--- ACCEPT REQUEST ATTEMPT ---")
@@ -1174,7 +1310,7 @@ class OperationalState(rx.State):
             logger.warning("Request ID %s not found in available_requests list", request_id)
             return rx.toast("Solicitação não encontrada na lista local.")
 
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
         if not token:
             logger.error("No auth token available for accept_request")
             return AuthState.expire_session()
@@ -1292,10 +1428,10 @@ class OperationalState(rx.State):
         """Close cancellation confirmation modal."""
         self.show_cancel_confirm = False
 
-    def confirm_cancel_atendimento(self):
+    async def confirm_cancel_atendimento(self):
         """Cancel attendance, revert status to pending in Xano, and return to provider home."""
         request_id = self.atendimento_mock.get("id")
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
 
         if request_id and token:
             try:
@@ -1314,10 +1450,10 @@ class OperationalState(rx.State):
         self.reset_atendimento()
         return rx.redirect("/home_provider")
 
-    def advance_atendimento_phase(self):
+    async def advance_atendimento_phase(self):
         """Advance through mock attendance phases in strict sequence."""
         request_id = self.atendimento_mock.get("id")
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
 
         if self.atendimento_phase == "A_CAMINHO":
             self.atendimento_phase = "NO_LOCAL"
@@ -1411,10 +1547,10 @@ class OperationalState(rx.State):
 
         return sorted(nearby, key=lambda x: x["distance"])
 
-    def notify_arrival(self):
+    async def notify_arrival(self):
         """Notify the client that the provider has arrived at the location."""
         request_id = self.atendimento_mock.get("id")
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
 
         if not request_id or not token:
             return rx.toast("Erro: Dados de atendimento insuficientes.")
@@ -1431,11 +1567,11 @@ class OperationalState(rx.State):
             logger.error("Failed to send arrival notification: %s", error)
             return rx.toast("Erro ao enviar notificação. Tente novamente.")
 
-    def open_message_panel(self):
+    async def open_message_panel(self):
         """Open the conversation panel and load the current messages."""
         self.message_error = ""
         self.show_message_panel = True
-        self.load_service_messages()
+        await self.load_service_messages()
 
     def close_message_panel(self):
         self.show_message_panel = False
@@ -1444,10 +1580,10 @@ class OperationalState(rx.State):
     def set_message_draft(self, value: str):
         self.message_draft = value
 
-    def load_service_messages(self):
+    async def load_service_messages(self):
         """Load the current service request conversation from Xano."""
         request_id = self.atendimento_mock.get("id")
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
         if not request_id or not token:
             self.message_error = "Não foi possível carregar as mensagens."
             return
@@ -1465,11 +1601,11 @@ class OperationalState(rx.State):
             logger.exception("Failed to load service messages")
             self.message_error = "Não foi possível carregar as mensagens."
 
-    def send_message(self):
+    async def send_message(self):
         """Send the drafted message and append the created record locally."""
         message_text = self.message_draft.strip()
         request_id = self.atendimento_mock.get("id")
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
         if not message_text:
             self.message_error = "Digite uma mensagem."
             return
@@ -1494,11 +1630,11 @@ class OperationalState(rx.State):
             logger.exception("Failed to send service message")
             self.message_error = "Não foi possível enviar a mensagem."
 
-    def open_client_message_panel(self):
+    async def open_client_message_panel(self):
         """Open the client conversation for the active request."""
         self.client_message_error = ""
         self.show_client_message_panel = True
-        self.load_client_service_messages()
+        await self.load_client_service_messages()
 
     def close_client_message_panel(self):
         self.show_client_message_panel = False
@@ -1507,9 +1643,9 @@ class OperationalState(rx.State):
     def set_client_message_draft(self, value: str):
         self.client_message_draft = value
 
-    def load_client_service_messages(self):
+    async def load_client_service_messages(self):
         """Load messages for the client's active request."""
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
         if self.request_id is None or not token:
             self.client_message_error = "Não foi possível carregar as mensagens."
             return
@@ -1527,10 +1663,10 @@ class OperationalState(rx.State):
             logger.exception("Failed to load client messages")
             self.client_message_error = "Não foi possível carregar as mensagens."
 
-    def send_client_message(self):
+    async def send_client_message(self):
         """Send a message from the client for the active request."""
         message_text = self.client_message_draft.strip()
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
         if not message_text:
             self.client_message_error = "Digite uma mensagem."
             return
@@ -1602,7 +1738,7 @@ class OperationalState(rx.State):
             self.request_error_message = "Ative sua localização antes de pedir socorro."
             return rx.toast(self.request_error_message)
 
-        token = self.auth_token or AuthState.auth_token
+        token = await self._get_auth_token()
         if not isinstance(token, str) or not token.strip():
             self.request_status = "idle"
             logger.warning("Service request skipped: authenticated token is unavailable")
@@ -2012,65 +2148,79 @@ def signup_screen() -> rx.Component:
 
 
 def login_screen() -> rx.Component:
-    return rx.center(
-        rx.vstack(
-            rx.text("acesso seguro", class_name="section-kicker"),
-            rx.heading("Entre para continuar.", class_name="section-title", size="8"),
-            rx.text("Use seu email e senha para acessar a SOS Drive.", class_name="section-intro"),
-            rx.form(
-                rx.vstack(
-                    text_input("Email", "voce@exemplo.com", AppState.email, AppState.set_email_value),
+    return rx.box(
+        rx.el.video(
+            src=LOGIN_BACKGROUND_VIDEO_URL,
+            poster="/login-bg-fallback.svg",
+            auto_play=True,
+            loop=True,
+            muted=True,
+            plays_inline=True,
+            aria_hidden="true",
+            class_name="login-background-video",
+        ),
+        rx.box(class_name="login-background-overlay", aria_hidden="true"),
+        rx.box(
+            rx.vstack(
+                rx.text("acesso seguro", class_name="section-kicker"),
+                rx.heading("Entre para continuar.", class_name="section-title", size="8"),
+                rx.text("Use seu email e senha para acessar a SOS Drive.", class_name="section-intro"),
+                rx.form(
                     rx.vstack(
-                        rx.text("Senha", class_name="field-label"),
-                        rx.input(
-                            type="password",
-                            placeholder="Sua senha",
-                            value=AppState.password,
-                            on_change=AppState.set_password_value,
+                        text_input("Email", "voce@exemplo.com", AppState.email, AppState.set_email_value),
+                        rx.vstack(
+                            rx.text("Senha", class_name="field-label"),
+                            rx.input(
+                                type="password",
+                                placeholder="Sua senha",
+                                value=AppState.password,
+                                on_change=AppState.set_password_value,
+                                width="100%",
+                                height="3.25rem",
+                                padding="0 1rem",
+                                border_radius="14px",
+                                border=f"1px solid {COLORS['line']}",
+                                background="white",
+                                color=COLORS["text"],
+                            ),
                             width="100%",
-                            height="3.25rem",
-                            padding="0 1rem",
-                            border_radius="14px",
-                            border=f"1px solid {COLORS['line']}",
-                            background="white",
-                            color=COLORS["text"],
+                            spacing="2",
+                        ),
+                        rx.button(
+                            rx.cond(AppState.is_loading, "Entrando...", "Entrar"),
+                            type="submit",
+                            class_name="primary-button",
+                            width="100%",
+                            disabled=AppState.is_loading,
+                        ),
+                        rx.cond(
+                            AppState.error_message != "",
+                            rx.text(AppState.error_message, class_name="error-message"),
                         ),
                         width="100%",
-                        spacing="2",
+                        spacing="5",
                     ),
-                    rx.button(
-                        rx.cond(AppState.is_loading, "Entrando...", "Entrar"),
-                        type="submit",
-                        class_name="primary-button",
-                        width="100%",
-                    ),
-                    rx.cond(
-                        AppState.error_message != "",
-                        rx.text(AppState.error_message, class_name="error-message"),
-                    ),
-                    width="100%",
-                    spacing="5",
+                    on_submit=AppState.login,
+                    width="min(100%, 29rem)",
                 ),
-                on_submit=AppState.login,
-                width="min(100%, 29rem)",
+                rx.button(
+                    "Voltar para apresentação",
+                    on_click=AppState.return_to_presentation,
+                    class_name="secondary-button",
+                ),
+                rx.button(
+                    "Criar uma conta",
+                    on_click=AppState.open_signup,
+                    class_name="text-button",
+                ),
+                width="min(100%, 38rem)",
+                align="start",
+                spacing="5",
+                class_name="login-panel login-background-card",
             ),
-            rx.button(
-                "Voltar para apresentação",
-                on_click=AppState.return_to_presentation,
-                class_name="secondary-button",
-            ),
-            rx.button(
-                "Criar uma conta",
-                on_click=AppState.open_signup,
-                class_name="text-button",
-            ),
-            width="min(100%, 38rem)",
-            align="start",
-            spacing="5",
-            class_name="login-panel",
+            class_name="login-content",
         ),
-        min_height="calc(100vh - 8rem)",
-        padding="2rem 1rem",
+        class_name="login-page",
     )
 
 
@@ -2699,8 +2849,14 @@ def profile_screen() -> rx.Component:
                         rx.vstack(
                             rx.box(
                                 rx.cond(
-                                    AppState.user_profile_photo != "",
-                                    rx.image(src=AppState.user_profile_photo, width="100%", height="100%", border_radius="50%", object_fit="cover"),
+                                    AppState.profile_photo_preview != "",
+                                    rx.image(
+                                        src=AppState.profile_photo_preview,
+                                        width="100%",
+                                        height="100%",
+                                        border_radius="50%",
+                                        object_fit="cover",
+                                    ),
                                     rx.center(
                                         rx.text(AppState.user_initials, font_size="2rem", weight="bold", color=COLORS["text"]),
                                         width="100%",
@@ -2870,6 +3026,7 @@ def profile_screen() -> rx.Component:
                 rx.button(
                     rx.cond(AppState.profile_is_loading, "Salvando...", "Salvar/Atualizar Dados"),
                     on_click=AppState.save_profile,
+                    disabled=AppState.profile_is_loading,
                     class_name="primary-button",
                     width="100%",
                 ),
@@ -3934,10 +4091,30 @@ def protected_page(page: Callable[[], rx.Component]) -> rx.Component:
 app = rx.App(
     style=GLOBAL_STYLE,
     head_components=[
-        rx.html('<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />'),
-        rx.html('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'),
-        rx.html('''
-        <script>
+        rx.el.link(
+            rel="stylesheet",
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
+        ),
+        rx.script(
+            src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+            defer=True,
+        ),
+        rx.script('''
+        (() => {
+        let leafletWaitAttempts = 0;
+        const initializeSOSMaps = () => {
+            if (window.sosMapsInitialized) return;
+            if (!window.L) {
+                if (leafletWaitAttempts < 100) {
+                    leafletWaitAttempts += 1;
+                    window.setTimeout(initializeSOSMaps, 50);
+                } else {
+                    console.error("Leaflet did not load; map features are unavailable.");
+                }
+                return;
+            }
+            window.sosMapsInitialized = true;
+
         window.sosMaps = {};
         window.sosMarkers = {};
         window.sosUserMarkers = {};
@@ -4069,7 +4246,14 @@ app = rx.App(
                 { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
             );
         };
-        </script>
+        };
+
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", initializeSOSMaps, { once: true });
+        } else {
+            initializeSOSMaps();
+        }
+        })();
         '''),
     ],
 )

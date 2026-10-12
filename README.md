@@ -20,17 +20,31 @@ SOSdrive/
 ## Executar
 
 ```powershell
+$env:XANO_API_URL = "https://seu-workspace.xano.io/api:seu-grupo"
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\reflex.exe run
 ```
 
-Abra `http://localhost:3000` no navegador.
+Defina `XANO_API_URL` antes de iniciar o Reflex; o login e o cadastro leem essa
+configuração quando o backend é iniciado. Abra `http://localhost:3000` no
+navegador.
 
-Para habilitar login e cadastro, configure a URL base da API Xano no ambiente:
+Se as portas padrão estiverem ocupadas, escolha portas livres explicitamente:
 
 ```powershell
-$env:XANO_API_URL = "https://seu-workspace.xano.io/api:seu-grupo"
+.venv\Scripts\reflex.exe run --frontend-port 3001 --backend-port 8100
+Test-NetConnection -ComputerName localhost -Port 3001
+Test-NetConnection -ComputerName localhost -Port 8100
+Get-NetTCPConnection -LocalPort 3001,8100 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object LocalAddress, LocalPort, OwningProcess
+Invoke-WebRequest -Uri http://localhost:3001 -UseBasicParsing
+Invoke-WebRequest -Uri http://localhost:8100/_health -UseBasicParsing
 ```
+
+Confirme `TcpTestSucceeded : True` para ambas e respostas HTTP bem-sucedidas
+antes de abrir `http://localhost:3001`. A consulta ao listener identifica o
+processo que já ocupa cada porta; se houver conflito, escolha outras portas
+livres em vez de encerrar um processo que possa pertencer a outro projeto.
 
 ## Regra de arquitetura
 
