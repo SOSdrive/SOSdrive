@@ -6,9 +6,11 @@ Chamados aceitos precisam registrar mensagens entre motorista e prestador, e o f
 
 - Criar a tabela `service_message` com referência 1:N a `service_request`.
 - Adicionar `POST /service_requests/{id}/messages` para criar mensagens autenticadas.
-- Derivar `sender_id` do usuário autenticado e validar a existência do chamado no backend.
+- Derivar `sender_id` do usuário autenticado e permitir acesso apenas ao cliente dono do chamado e ao prestador atribuído.
+- Registrar no chamado o prestador autenticado que o aceitou e proteger a atribuição no backend.
+- Atualizar a conversa aberta automaticamente a cada 2 segundos, sem duplicar mensagens e sem polling quando o painel estiver fechado.
 - Adicionar o contrato `PATCH /service_requests/{id}` para permitir a transição para `completed` a partir de `accepted` ou `in_progress`.
-- Preservar o endpoint legado `POST /update_request_status` para não quebrar o cliente Reflex atual.
+- Preservar a rota legada `POST /update_request_status` para liberar um chamado ao cancelá-lo, restringindo a ação ao prestador atribuído e à transição para `pending`.
 
 ## Capabilities
 
@@ -22,7 +24,8 @@ Chamados aceitos precisam registrar mensagens entre motorista e prestador, e o f
 
 ## Impact
 
-- **Xano**: nova tabela, novo endpoint POST e novo endpoint PATCH no grupo `Service Requests`.
+- **Xano**: vínculo do prestador no chamado, endpoints autenticados de aceite e autorização nas rotas de mensagens; a rota legada de status continua disponível somente para liberar o chamado do prestador atribuído.
 - **Domínio**: amplia a entidade Chamado; cada mensagem pertence a um Chamado e a um usuário remetente.
-- **Autorização**: permanece no Xano, usando o token atual e `$auth.id`; não há alteração visual nem de lógica do frontend.
-- **Rollback**: remover os endpoints novos e a tabela `service_message`; o endpoint legado continua disponível.
+- **Autorização**: permanece no Xano, usando o token atual e `$auth.id`; a conversa aberta consulta o endpoint existente em intervalo curto para refletir mensagens de ambos os participantes.
+- **Frontend**: atualiza a lista ao vivo somente enquanto a conversa estiver aberta e preserva mensagens carregadas em caso de falha temporária de rede.
+- **Rollback**: remover os endpoints novos e a tabela `service_message`; a rota legada permanece disponível com a validação de autorização para liberação do chamado.

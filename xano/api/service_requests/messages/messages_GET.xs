@@ -18,7 +18,7 @@ query "{id}/messages" verb=GET {
       error = "Service request not found."
     }
 
-    precondition ($service_request.user_id == $auth.id || $auth.role == "prestador") {
+    precondition ($service_request.user_id == $auth.id || $service_request.provider_id == $auth.id) {
       error_type = "accessdenied"
       error = "You cannot access messages for this service request."
     }

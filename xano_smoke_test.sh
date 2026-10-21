@@ -34,6 +34,7 @@ assert_status() {
 
 assert_status GET "/1/messages" 401
 assert_status POST "/1/messages" 401 '{"message_text":"probe"}'
+assert_status POST "/1/accept" 401
 assert_status PATCH "/1/status" 401 '{"status":"completed"}'
 assert_status PATCH "/1" 404 '{"status":"completed"}'
 assert_status PATCH "/1/messages" 404 '{"status":"completed"}'

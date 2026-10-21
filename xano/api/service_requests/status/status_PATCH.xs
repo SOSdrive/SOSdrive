@@ -9,6 +9,11 @@ query "{id}/status" verb=PATCH {
   }
 
   stack {
+    db.get user {
+      field_name = "id"
+      field_value = $auth.id
+    } as $authenticated_user
+
     db.get service_request {
       field_name = "id"
       field_value = $input.id
@@ -27,6 +32,11 @@ query "{id}/status" verb=PATCH {
     precondition ($existing_request.status == "accepted" || $existing_request.status == "in_progress") {
       error_type = "inputerror"
       error = "Service request cannot be completed from its current status."
+    }
+
+    precondition ($existing_request.provider_id == $auth.id && $authenticated_user.role == "prestador") {
+      error_type = "accessdenied"
+      error = "Only the assigned provider can complete this service request."
     }
 
     db.edit service_request {

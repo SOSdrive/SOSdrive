@@ -19,6 +19,11 @@ query "{id}/messages" verb=POST {
       error = "Service request not found."
     }
 
+    precondition ($service_request.user_id == $auth.id || $service_request.provider_id == $auth.id) {
+      error_type = "accessdenied"
+      error = "You cannot send messages for this service request."
+    }
+
     precondition ($input.message_text != "") {
       error_type = "inputerror"
       error = "Message text is required."

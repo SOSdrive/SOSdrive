@@ -8,6 +8,10 @@ table service_request {
       table = "user"
       description = "Authenticated user requesting service"
     }
+    int provider_id? {
+      table = "user"
+      description = "Authenticated provider assigned to this service request"
+    }
     int vehicle_id {
       table = "vehicle"
       description = "Vehicle used for the service"
@@ -23,6 +27,7 @@ table service_request {
   index = [
     {type: "primary", field: [{name: "id"}]},
     {type: "btree", field: [{name: "user_id", op: "asc"}]},
+    {type: "btree", field: [{name: "provider_id", op: "asc"}]},
     {type: "btree", field: [{name: "created_at", op: "desc"}]}
   ]
   guid = "PJ8QmESUAbn4C3qIoIg5KGDn-n8"

@@ -8,7 +8,10 @@ import requests
 from sosdrive import (
     AuthState,
     InvalidCredentialsError,
+    XanoMalformedResponseError,
     XanoAPIError,
+    _safe_xano_endpoint,
+    fetch_authenticated_user,
     login_with_xano,
 )
 
@@ -91,11 +94,19 @@ class TestXanoLogin(unittest.TestCase):
         response.json.return_value = {"unexpected": "response"}
 
         with patch("sosdrive.requests.post", return_value=response):
-            with self.assertRaises(XanoAPIError):
+            with self.assertRaises(XanoMalformedResponseError):
+                login_with_xano("ana@example.com", "secret", "https://xano.example/api")
+
+    def test_login_rejects_non_json_success_response(self):
+        response = Mock(status_code=200)
+        response.json.side_effect = ValueError("response contained private data")
+
+        with patch("sosdrive.requests.post", return_value=response):
+            with self.assertRaises(XanoMalformedResponseError):
                 login_with_xano("ana@example.com", "secret", "https://xano.example/api")
 
     def test_login_maps_http_400_and_401_to_safe_credential_errors(self):
-        for status_code in (400, 401):
+        for status_code in (400, 401, 403):
             with self.subTest(status_code=status_code):
                 response = Mock(status_code=status_code)
                 response.content = b'{"message":"Invalid credentials"}'
@@ -139,13 +150,34 @@ class TestXanoLogin(unittest.TestCase):
                 "sosdrive.login_with_xano",
                 side_effect=requests.ConnectionError("private network detail"),
             ),
+            self.assertLogs("sosdrive", level="WARNING") as captured,
         ):
             consume_event_generator(state.login())
 
         self.assertEqual(state.error_message, CONNECTION_ERROR)
+        self.assertIn("transport failure", "\n".join(captured.output))
+        self.assertNotIn("private network detail", "\n".join(captured.output))
         self.assertEqual(state.password, "")
         self.assertFalse(state.is_loading)
         self.assertEqual(state.auth_token, "")
+
+    def test_login_timeout_is_classified_as_transport_failure(self):
+        state = make_auth_state()
+        with (
+            patch.dict("os.environ", {"XANO_API_URL": "https://xano.example/api"}),
+            patch(
+                "sosdrive.login_with_xano",
+                side_effect=requests.Timeout("private timeout detail"),
+            ),
+            self.assertLogs("sosdrive", level="WARNING") as captured,
+        ):
+            consume_event_generator(state.login())
+
+        self.assertEqual(state.error_message, CONNECTION_ERROR)
+        self.assertIn("exception=Timeout", "\n".join(captured.output))
+        self.assertNotIn("private timeout detail", "\n".join(captured.output))
+        self.assertFalse(state.is_loading)
+        self.assertEqual(state.password, "")
 
     def test_login_exposes_loading_state_while_xano_request_is_pending(self):
         state = make_auth_state()
@@ -188,7 +220,8 @@ class TestXanoLogin(unittest.TestCase):
             consume_event_generator(state.login())
 
         login_request.assert_not_called()
-        self.assertEqual(state.error_message, CONNECTION_ERROR)
+        self.assertIn("Crie `.env` na raiz do projeto", state.error_message)
+        self.assertIn(".env.example", state.error_message)
         self.assertEqual(state.password, "")
         self.assertFalse(state.is_loading)
 
@@ -201,9 +234,65 @@ class TestXanoLogin(unittest.TestCase):
             consume_event_generator(state.login())
 
         login_request.assert_not_called()
-        self.assertEqual(state.error_message, CONNECTION_ERROR)
+        self.assertIn("XANO_API_URL inválida", state.error_message)
         self.assertEqual(state.password, "")
         self.assertFalse(state.is_loading)
+
+    def test_missing_api_url_log_names_configuration_cause_without_secrets(self):
+        state = make_auth_state()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("sosdrive.login_with_xano") as login_request,
+            self.assertLogs("sosdrive", level="ERROR") as captured,
+        ):
+            consume_event_generator(state.login())
+
+        login_request.assert_not_called()
+        self.assertIn("XANO_API_URL", "\n".join(captured.output))
+        self.assertIn("reason=missing", "\n".join(captured.output))
+        self.assertNotIn("secret", "\n".join(captured.output))
+
+    def test_non_credential_http_failure_reports_status_and_safe_endpoint(self):
+        state = make_auth_state()
+        failure = XanoAPIError(503, "private response details")
+        with (
+            patch.dict("os.environ", {"XANO_API_URL": "https://xano.example/api"}),
+            patch("sosdrive.login_with_xano", side_effect=failure),
+            self.assertLogs("sosdrive", level="ERROR") as captured,
+        ):
+            consume_event_generator(state.login())
+
+        self.assertIn("HTTP 503", state.error_message)
+        self.assertIn("/auth/login", state.error_message)
+        self.assertIn("status=503", "\n".join(captured.output))
+        self.assertNotIn("private response details", "\n".join(captured.output))
+
+    def test_endpoint_diagnostics_strip_url_credentials_query_and_fragment(self):
+        self.assertEqual(
+            _safe_xano_endpoint(
+                "https://user:password@xano.example:443/api:group/auth/login?token=secret#private"
+            ),
+            "https://xano.example:443/api:group/auth/login",
+        )
+
+    def test_authenticated_user_response_logs_status_without_response_body(self):
+        response = Mock(status_code=200, content=b'{"id":7,"token":"sensitive-user-token"}')
+        response.json.return_value = {"id": 7, "token": "sensitive-user-token"}
+        with (
+            patch("sosdrive.requests.get", return_value=response),
+            self.assertLogs("sosdrive", level="INFO") as captured,
+        ):
+            user = fetch_authenticated_user(
+                "sensitive-auth-token",
+                "https://xano.example/api",
+                "7",
+            )
+
+        self.assertEqual(user["id"], 7)
+        log_output = "\n".join(captured.output)
+        self.assertIn("status=200", log_output)
+        self.assertNotIn("sensitive-user-token", log_output)
+        self.assertNotIn("sensitive-auth-token", log_output)
 
     def test_login_uses_safe_invalid_credentials_message(self):
         state = make_auth_state()
